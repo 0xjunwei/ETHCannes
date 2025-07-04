@@ -1,23 +1,16 @@
 {
-  "name": "gasout-rpc-proxy",
+  "name": "rpc-proxy",
   "version": "1.0.0",
-  "description": "Local JSON-RPC proxy that sponsors gas then forwards transactions to an upstream provider.",
+  "description": "RPC proxy for gas sponsorship",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "test": "node src/test.js"
   },
-  "keywords": ["ethereum", "rpc", "proxy", "gas", "sponsor"],
-  "author": "Gas Out",
-  "license": "MIT",
   "dependencies": {
-    "axios": "^1.6.2",
+    "axios": "^1.6.7",
     "cors": "^2.8.5",
-    "dotenv": "^16.3.1",
     "express": "^4.18.2",
     "morgan": "^1.10.0"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.2"
   }
 } 

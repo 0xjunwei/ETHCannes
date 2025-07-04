@@ -19,6 +19,128 @@ function fromHex(hex) {
   return BigInt(hex);
 }
 
+// Add this helper function to calculate gas in ETH
+function weiToEth(wei) {
+  return Number(wei) / 1e18;
+}
+
+// Add standard gas costs
+const STANDARD_GAS_COSTS = {
+  ETH_TRANSFER: 21000n,
+  ERC20_TRANSFER: 65000n,
+  ERC20_APPROVE: 46000n,
+  SWAP: 200000n,
+  DEFAULT: 100000n
+};
+
+// Helper to identify transaction type
+function identifyTransactionType(tx) {
+  if (!tx.data || tx.data === '0x') {
+    return 'ETH_TRANSFER';
+  }
+  
+  // Check function signatures
+  const functionSig = tx.data.slice(0, 10).toLowerCase();
+  switch (functionSig) {
+    case '0xa9059cbb': // transfer(address,uint256)
+      return 'ERC20_TRANSFER';
+    case '0x095ea7b3': // approve(address,uint256)
+      return 'ERC20_APPROVE';
+    case '0x38ed1739': // swapExactTokensForTokens
+    case '0x7ff36ab5': // swapExactETHForTokens
+    case '0x18cbafe5': // swapExactTokensForETH
+      return 'SWAP';
+    default:
+      return 'DEFAULT';
+  }
+}
+
+// Add this helper to estimate gas for transactions
+async function estimateGasAndCost(tx) {
+  try {
+    // Get current gas price first
+    const gasPriceResponse = await forwardRpc({
+      jsonrpc: '2.0',
+      method: 'eth_gasPrice',
+      params: [],
+      id: Date.now()
+    });
+
+    if (!gasPriceResponse?.result) {
+      throw new Error('Failed to get gas price');
+    }
+
+    const gasPrice = fromHex(gasPriceResponse.result);
+    let gasLimit;
+
+    try {
+      // Try to estimate gas
+      const gasEstimateResponse = await forwardRpc({
+        jsonrpc: '2.0',
+        method: 'eth_estimateGas',
+        params: [{
+          from: tx.from,
+          to: tx.to,
+          data: tx.data || '0x',
+          value: tx.value || '0x0'
+        }],
+        id: Date.now()
+      });
+
+      if (gasEstimateResponse?.result) {
+        gasLimit = fromHex(gasEstimateResponse.result);
+        console.log('✅ Using estimated gas limit:', gasLimit.toString());
+      } else {
+        throw new Error('Gas estimation failed');
+      }
+    } catch (estimateError) {
+      // Use standard gas costs as fallback
+      const txType = identifyTransactionType(tx);
+      gasLimit = STANDARD_GAS_COSTS[txType];
+      console.log(`⚠️ Using standard gas limit for ${txType}:`, gasLimit.toString());
+    }
+
+    // Calculate total gas cost
+    const gasCost = gasPrice * gasLimit;
+
+    const result = {
+      gasPrice,
+      gasLimit,
+      totalCost: gasCost,
+      formatted: {
+        gasPrice: weiToEth(gasPrice),
+        totalCost: weiToEth(gasCost),
+        gasLimit: Number(gasLimit)
+      },
+      isEstimated: true
+    };
+
+    console.log('💡 Gas calculation details:', {
+      type: identifyTransactionType(tx),
+      gasPrice: result.formatted.gasPrice.toFixed(9),
+      gasLimit: result.formatted.gasLimit,
+      totalCost: result.formatted.totalCost.toFixed(6)
+    });
+
+    return result;
+
+  } catch (error) {
+    console.error('Error in gas estimation:', error.message);
+    // Return null to indicate failure
+    return null;
+  }
+}
+
+// Add this helper to check if method requires gas
+function requiresGas(method) {
+  return [
+    'eth_sendTransaction',
+    'eth_sendRawTransaction',
+    'eth_call',
+    'eth_estimateGas'
+  ].includes(method);
+}
+
 // 1 ETH in wei (10^18)
 const ONE_ETH = '0x0de0b6b3a7640000';
 
@@ -87,6 +209,19 @@ app.post('/', async (req, res) => {
   }
 
   try {
+    // Check if this request requires gas
+    if (requiresGas(payload.method) && payload.params?.[0]) {
+      const tx = payload.params[0];
+      const gas = await estimateGasAndCost(tx);
+      
+      if (gas) {
+        const txType = identifyTransactionType(tx);
+        console.log(`⛽ ${payload.method} [${txType}] - Gas: ${gas.formatted.gasLimit} units, Cost: ${gas.formatted.totalCost.toFixed(6)} ETH @ ${gas.formatted.gasPrice.toFixed(9)} ETH/unit`);
+      } else {
+        console.log(`⚠️ Could not calculate gas for ${payload.method}`);
+      }
+    }
+
     // Check if this request should return spoofed balance
     if (shouldSpoofBalance(payload)) {
       if (requestType === 'real') {
