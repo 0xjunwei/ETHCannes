@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 
 interface ITokenMessengerV2 {
     function depositForBurn(
@@ -17,29 +18,14 @@ interface ITokenMessengerV2 {
     ) external;
 }
 
-// Message transmitter receiver interface
-interface IMessageTransmitterV2 {
-    function receiveMessage(
-        bytes calldata message,
-        bytes calldata attestation
-    ) external returns (bool);
-
-    function sendMessage(
-        uint32 destinationDomain,
-        bytes32 recipient,
-        bytes32 destinationCaller,
-        uint32 minFinalityThreshold,
-        bytes calldata messageBody
-    ) external;
-}
-
 contract Node is Ownable, AccessControl {
     bytes32 public constant AUTHORIZED = keccak256("AUTHORIZED");
     // Address for usdc will never change immutable it to reduce gas
     IERC20 public immutable usdc;
     // CCTP Contracts
     ITokenMessengerV2 public tokenMessenger;
-
+    /// Chainlink ETH/USD price feed
+    AggregatorV3Interface public immutable priceFeed;
     // Stores their balance for allowance everytime they do a gasRelay
     mapping(address => uint256) public usdcForGasRemaining;
 
@@ -51,9 +37,14 @@ contract Node is Ownable, AccessControl {
         bytes32 mintRecipient
     );
 
-    constructor(address _usdc, address _tokenMessenger) Ownable(msg.sender) {
+    constructor(
+        address _usdc,
+        address _tokenMessenger,
+        address _priceFeed
+    ) Ownable(msg.sender) {
         usdc = IERC20(_usdc);
         tokenMessenger = ITokenMessengerV2(_tokenMessenger);
+        priceFeed = AggregatorV3Interface(_priceFeed);
         _grantRole(AUTHORIZED, msg.sender);
     }
 
@@ -97,6 +88,41 @@ contract Node is Ownable, AccessControl {
             destinationDomain,
             destinationUserAddress
         );
+    }
+
+    // Same chain gas drop
+    function sameChainGasToken(
+        address user,
+        uint256 ethGasWei
+    ) external onlyAuthorized {
+        // Pull usdc and drop gas, poc no additional fee, for stability purpose in future add 5% surcharge to prevent volatile eth prices
+        // Integrate swap mechanism to swap to eth upon dispensing
+        // compute how much USDC is needed
+        uint256 usdcAmt = _computeUsdcAmount(ethGasWei);
+
+        // pull USDC from the user's wallet
+        require(
+            usdc.transferFrom(user, address(this), usdcAmt),
+            "USDC pull failed"
+        );
+        // update the contract gas balance
+        uint256 remaining = usdc.allowance(user, address(this));
+        usdcForGasRemaining[user] = remaining;
+        // Send native ETH to the user as gas reimbursement
+        (bool success, ) = payable(user).call{value: ethGasWei}("");
+        require(success, "ETH transfer failed");
+    }
+
+    /// Compute USDC amount from given ETH using Chainlink price feed
+    function _computeUsdcAmount(
+        uint256 ethWei
+    ) internal view returns (uint256 usdcAmount) {
+        (, int256 priceInt, , , ) = priceFeed.latestRoundData();
+        require(priceInt > 0, "Invalid price");
+        uint256 ethUsd = uint256(priceInt);
+        // usdc has 6 decimals, price feed 8, ethWei 18 -> divide by 1e20
+        usdcAmount = (ethWei * ethUsd) / 1e20;
+        require(usdcAmount > 0, "USDC amount zero");
     }
 
     function withdrawTokens(
