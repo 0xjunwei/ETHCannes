@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Gas Out - RPC Proxy",
+  "version": "1.0",
+  "description": "Web3 gas sponsorship proxy for seamless transactions",
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+  "host_permissions": ["*://*/*"],
+  "content_scripts": [
+    {
+      "matches": ["*://*/*"],
+      "js": ["content-script.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Gas Out Proxy"
+  }
+}
