@@ -27,7 +27,7 @@ const Header = () => {
               <span className="text-white font-bold text-xl">FC</span>
             </div>
           </div>
-          <span className="text-white font-bold text-xl">USDC Gas Payment Interface</span>
+          <span className="text-white font-bold text-xl">FullCircle</span>
         </div>
       </motion.div>
       

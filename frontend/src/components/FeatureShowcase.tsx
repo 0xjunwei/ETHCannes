@@ -64,7 +64,7 @@ const FeatureShowcase = () => {
           transition={{ duration: 0.5 }}
         >
           <h2 className="text-3xl md:text-4xl font-bold text-white mb-3">
-            Pay for Gas with <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-500 to-purple-600">USDC</span>
+            Gas Payment Interface using <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-500 to-purple-600">USDC</span>
           </h2>
           <p className="text-slate-300 text-lg max-w-2xl mx-auto">
             FullCircle enables users to leverage USDC Gas payments on pre-existing Dapps using their USDC balances from multiple chains
