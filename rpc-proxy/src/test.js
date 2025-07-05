@@ -1,4 +1,4 @@
-const axios = require('axios');
+import axios from 'axios';
 
 // Configuration
 const PROXY_URL = 'http://localhost:8545';
