@@ -7,31 +7,16 @@ const rateLimit = require("express-rate-limit");
 const { relayRouter } = require("./routes/relay");
 
 const app = express();
-
-// Security & parsing
 app.use(helmet());
-app.use(
-  cors({
-    origin: ["http://localhost:3000", "http://127.0.0.1:3000"],
-  })
-);
+app.use(cors({ origin: ["http://127.0.0.1:3000"] }));
 app.use(express.json());
+app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 100 }));
 
-// Global rate limit
-app.use(
-  rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 100,
-    message: "Too many requests, please try again later.",
-  })
-);
-
-// Mount API routes
+// Only one router with all three endpoints
 app.use("/api", relayRouter);
 
-// Bind only to localhost
-const PORT = process.env.PORT;
-const HOST = process.env.HOST;
+const PORT = process.env.PORT || 3000;
+const HOST = process.env.HOST || "127.0.0.1";
 app.listen(PORT, HOST, () => {
-  console.log(`🚀 Server running at http://${HOST}:${PORT}`);
+  console.log(`🚀 Server listening on http://${HOST}:${PORT}/api/relay`);
 });
