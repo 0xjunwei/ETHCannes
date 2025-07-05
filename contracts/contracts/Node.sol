@@ -18,14 +18,33 @@ interface ITokenMessengerV2 {
     ) external;
 }
 
+// Message transmitter receiver interface
+interface IMessageTransmitterV2 {
+    function receiveMessage(
+        bytes calldata message,
+        bytes calldata attestation
+    ) external returns (bool);
+
+    function sendMessage(
+        uint32 destinationDomain,
+        bytes32 recipient,
+        bytes32 destinationCaller,
+        uint32 minFinalityThreshold,
+        bytes calldata messageBody
+    ) external;
+}
+
 contract Node is Ownable, AccessControl {
     bytes32 public constant AUTHORIZED = keccak256("AUTHORIZED");
     // Address for usdc will never change immutable it to reduce gas
     IERC20 public immutable usdc;
     // CCTP Contracts
     ITokenMessengerV2 public tokenMessenger;
+    IMessageTransmitterV2 public immutable messageTransmitter;
     /// Chainlink ETH/USD price feed
     AggregatorV3Interface public immutable priceFeed;
+    // Vaults
+    mapping(address => bool) public isAuthorizedVault;
     // Stores their balance for allowance everytime they do a gasRelay
     mapping(address => uint256) public usdcForGasRemaining;
 
@@ -37,13 +56,34 @@ contract Node is Ownable, AccessControl {
         bytes32 mintRecipient
     );
 
+    event GasDispersedWithHook(
+        address indexed caller,
+        address indexed user,
+        uint256 ethGasWei,
+        uint256 usdcAmount,
+        uint32 destinationDomain,
+        bytes32 vaultRecipient,
+        bytes hookData
+    );
+
+    event GasMessageSent(
+        address indexed caller,
+        address indexed user,
+        uint256 ethGasWei,
+        uint32 destinationDomain,
+        bytes32 vaultRecipient,
+        bytes hookData
+    );
+
     constructor(
         address _usdc,
         address _tokenMessenger,
+        address _messageTransmitter,
         address _priceFeed
     ) Ownable(msg.sender) {
         usdc = IERC20(_usdc);
         tokenMessenger = ITokenMessengerV2(_tokenMessenger);
+        messageTransmitter = IMessageTransmitterV2(_messageTransmitter);
         priceFeed = AggregatorV3Interface(_priceFeed);
         _grantRole(AUTHORIZED, msg.sender);
     }
@@ -111,6 +151,54 @@ contract Node is Ownable, AccessControl {
         // Send native ETH to the user as gas reimbursement
         (bool success, ) = payable(user).call{value: ethGasWei}("");
         require(success, "ETH transfer failed");
+    }
+
+    /// Send a cross-chain gas‐reimbursement message CCTP
+    function relayGasMessage(
+        address user,
+        uint256 ethGasWei,
+        uint32 destinationDomain,
+        bytes32 vaultRecipient,
+        uint32 minFinalityThreshold
+    ) external onlyAuthorized {
+        require(user != address(0), "Invalid user");
+        require(vaultRecipient != bytes32(0), "Invalid recipient");
+        // Should check if vault is in authorizedList but mvp save time, as i dont wish to authorize every vault for every chain n^n-1 combinations.
+        // If relay was called wrongly gas be wasted and user funds pulled but POC, create2 deploy to same address would save this issue.
+        // Lazy to use create2
+
+        // compute how much USDC is needed
+        uint256 usdcAmt = _computeUsdcAmount(ethGasWei);
+
+        // pull USDC from the user's wallet
+        require(
+            usdc.transferFrom(user, address(this), usdcAmt),
+            "USDC pull failed"
+        );
+        // update the contract gas balance
+        uint256 remaining = usdc.allowance(user, address(this));
+        usdcForGasRemaining[user] = remaining;
+
+        // pack hook data
+        bytes memory hookData = abi.encode(user, ethGasWei);
+
+        // call the MessageTransmitter directly instead of TokenMessenger
+        messageTransmitter.sendMessage(
+            destinationDomain,
+            vaultRecipient, // recipient
+            vaultRecipient, // destinationCaller, restrict incase for vulnerability, cant think of any rn but precaution
+            minFinalityThreshold,
+            hookData
+        );
+
+        emit GasMessageSent(
+            msg.sender,
+            user,
+            ethGasWei,
+            destinationDomain,
+            vaultRecipient,
+            hookData
+        );
     }
 
     /// Compute USDC amount from given ETH using Chainlink price feed
