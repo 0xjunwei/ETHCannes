@@ -1,0 +1,39 @@
+############################################
+# RPC Proxy Environment Configuration File #
+############################################
+
+ALCHEMY_API_KEY=qBkrQjmVDZgDPlzONjeyC
+
+# Upstream public RPC endpoint. lets use arb sepolia for both for now
+ARB_SEPOLIA_RPC_URL1=https://arb-sepolia.g.alchemy.com/v2/qBkrQjmVDZgDPlzONjeyC
+ARB_SEPOLIA_RPC_URL2=https://arb-sepolia.g.alchemy.com/v2/nIjfgixu8KExlH2SpCywk
+ARB_SEPOLIA_CHAIN_ID=421614
+
+# Alchemy API Key
+ALCHEMY_API_KEY=qBkrQjmVDZgDPlzONjeyC
+# Base Sepolia RPCs  
+BASE_SEPOLIA_RPC_URL1=https://base-sepolia.g.alchemy.com/v2/gbgIhNR-N5JnyXoRSZkC0EzWIfY_AQuz
+BASE_SEPOLIA_RPC_URL2=https://base-sepolia.g.alchemy.com/v2/ULTH9tsQQPIblKsuB_fuY
+BASE_SEPOLIA_CHAIN_ID=84532
+
+# Optimism Sepolia RPCs
+OPT_SEPOLIA_RPC_URL1=https://opt-sepolia.g.alchemy.com/v2/gbgIhNR-N5JnyXoRSZkC0EzWIfY_AQuz
+OPT_SEPOLIA_RPC_URL2=https://opt-sepolia.g.alchemy.com/v2/9tEiwUHgFB0UkABPg05wd
+OPT_SEPOLIA_CHAIN_ID=11155420
+
+# Host & port for the proxy to listen on
+HOST=0.0.0.0
+PORT=8545 
+
+# Watched Approval Addresses
+# Arbitrum Sepolia
+USDC_ARBITRUM_SEPOLIA_ADDRESS=0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d
+ARBITRUM_SPENDER_ADDRESS=0x307cf6B676284afF0ec40787823ce585fA116B29
+
+# Base Sepolia
+USDC_BASE_SEPOLIA_ADDRESS=0x036CbD53842c5426634e7929541eC2318f3dCF7e
+BASE_SPENDER_ADDRESS=0x96f1D2642455011aC5bEBF2cB875fc85F0Cb3691
+
+# Optimism Sepolia
+USDC_OP_SEPOLIA_ADDRESS=0x5fd84259d66Cd46123540766Be93DFE6D43130D7
+OP_SPENDER_ADDRESS=0xFd63ED60B1606A35e3D390066BAD3E498301Fc79
