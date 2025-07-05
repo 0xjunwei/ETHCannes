@@ -1,5 +1,7 @@
-const axios = require('axios');
-const { upstreamRpcUrl } = require('./config');
+import axios from 'axios';
+import config from './config.js';
+
+const { upstreamRpcUrl } = config;
 
 /**
  * Forwards a single JSON-RPC payload to the upstream provider.
@@ -40,4 +42,4 @@ async function forwardRpc(payload) {
   }
 }
 
-module.exports = { forwardRpc }; 
+export { forwardRpc }; 

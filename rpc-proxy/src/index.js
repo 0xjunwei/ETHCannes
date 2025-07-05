@@ -1,8 +1,9 @@
-const express = require('express');
-const cors = require('cors');
-const morgan = require('morgan');
-const { forwardRpc } = require('./forwarder');
-const config = require('./config');
+import express from 'express';
+import cors from 'cors';
+import morgan from 'morgan';
+import fetch from 'node-fetch';
+import { forwardRpc } from './forwarder.js';
+import config from './config.js';
 
 const app = express();
 app.use(cors());
@@ -55,10 +56,75 @@ function identifyTransactionType(tx) {
   }
 }
 
-// Add this helper to estimate gas for transactions
+// Add these variables at the top level of the file, after the imports
+let cachedEthPrice = null;
+let lastPriceUpdate = 0;
+const PRICE_UPDATE_INTERVAL = 60000; // 1 minute in milliseconds
+
+// Modify the getEthPrice function to use caching
+async function getEthPrice() {
+  const now = Date.now();
+  
+  // Return cached price if it's less than 1 minute old
+  if (cachedEthPrice && (now - lastPriceUpdate) < PRICE_UPDATE_INTERVAL) {
+    return cachedEthPrice;
+  }
+
+  try {
+    // Extract API key from the RPC URL if using Alchemy
+    const upstreamUrl = new URL(config.upstreamRpcUrl);
+    const alchemyApiKey = upstreamUrl.pathname.split('/').pop();
+    
+    // Format URL exactly like the sample
+    const url = `https://api.g.alchemy.com/prices/v1/${alchemyApiKey}/tokens/by-symbol?symbols=ETH`;
+    const options = { 
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json'
+      }
+    };
+
+    const response = await fetch(url, options);
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+    
+    // Extract price using the exact response format from the sample
+    if (!data?.data?.[0]?.prices?.[0]?.value) {
+      throw new Error('Invalid response format from price API');
+    }
+
+    const price = parseFloat(data.data[0].prices[0].value);
+    const lastUpdatedAt = data.data[0].prices[0].lastUpdatedAt;
+    
+    // Update cache and timestamp
+    cachedEthPrice = price;
+    lastPriceUpdate = now;
+    
+    // Log price updates every minute with 2 decimal places
+    console.log(`💲 ETH Price Update: $${price.toFixed(2)} (Updated: ${lastUpdatedAt})`);
+    
+    return price;
+
+  } catch (error) {
+    console.error('Error fetching ETH price:', error.message);
+    // Return cached price if available, even if it's old, when there's an error
+    return cachedEthPrice || null;
+  }
+}
+
+// Update the estimateGasAndCost function to remove redundant logging
 async function estimateGasAndCost(tx) {
   try {
-    // Get current gas price first
+    // Get ETH price first
+    const ethPrice = await getEthPrice();
+    if (!ethPrice) {
+      console.warn('⚠️ Could not fetch ETH price, USD estimates will not be available');
+    }
+
+    // Get current gas price
     const gasPriceResponse = await forwardRpc({
       jsonrpc: '2.0',
       method: 'eth_gasPrice',
@@ -89,44 +155,34 @@ async function estimateGasAndCost(tx) {
 
       if (gasEstimateResponse?.result) {
         gasLimit = fromHex(gasEstimateResponse.result);
-        console.log('✅ Using estimated gas limit:', gasLimit.toString());
       } else {
         throw new Error('Gas estimation failed');
       }
     } catch (estimateError) {
-      // Use standard gas costs as fallback
       const txType = identifyTransactionType(tx);
       gasLimit = STANDARD_GAS_COSTS[txType];
-      console.log(`⚠️ Using standard gas limit for ${txType}:`, gasLimit.toString());
     }
 
-    // Calculate total gas cost
+    // Calculate costs with high precision
     const gasCost = gasPrice * gasLimit;
+    const gasCostInEth = weiToEth(gasCost);
+    const usdCost = ethPrice ? Number((gasCostInEth * ethPrice).toFixed(2)) : null;
 
-    const result = {
+    return {
       gasPrice,
       gasLimit,
       totalCost: gasCost,
       formatted: {
         gasPrice: weiToEth(gasPrice),
-        totalCost: weiToEth(gasCost),
-        gasLimit: Number(gasLimit)
+        totalCost: gasCostInEth,
+        gasLimit: Number(gasLimit),
+        usdCost: usdCost
       },
       isEstimated: true
     };
 
-    console.log('💡 Gas calculation details:', {
-      type: identifyTransactionType(tx),
-      gasPrice: result.formatted.gasPrice.toFixed(9),
-      gasLimit: result.formatted.gasLimit,
-      totalCost: result.formatted.totalCost.toFixed(6)
-    });
-
-    return result;
-
   } catch (error) {
     console.error('Error in gas estimation:', error.message);
-    // Return null to indicate failure
     return null;
   }
 }
@@ -216,7 +272,12 @@ app.post('/', async (req, res) => {
       
       if (gas) {
         const txType = identifyTransactionType(tx);
-        console.log(`⛽ ${payload.method} [${txType}] - Gas: ${gas.formatted.gasLimit} units, Cost: ${gas.formatted.totalCost.toFixed(6)} ETH @ ${gas.formatted.gasPrice.toFixed(9)} ETH/unit`);
+        console.log(`⛽ ${payload.method} [${txType}]:`);
+        console.log(`   Gas: ${gas.formatted.gasLimit} units @ ${gas.formatted.gasPrice.toFixed(9)} ETH/unit`);
+        console.log(`   Cost: ${gas.formatted.totalCost.toFixed(6)} ETH`);
+        if (gas.formatted.usdCost) {
+          console.log(`   USD Cost: $${gas.formatted.usdCost}`);
+        }
       } else {
         console.log(`⚠️ Could not calculate gas for ${payload.method}`);
       }
@@ -252,13 +313,11 @@ app.post('/', async (req, res) => {
 
     // Special handling for eth_call (token operations)
     if (payload.method === 'eth_call') {
-      console.log('📞 Forwarding eth_call without modification');
       const upstreamResponse = await forwardRpc(payload);
       return res.json(upstreamResponse);
     }
 
     // Forward all other requests to upstream
-    console.log(`🔄 Forwarding ${payload.method} to upstream`);
     const upstreamResponse = await forwardRpc(payload);
     return res.json(upstreamResponse);
 
@@ -281,6 +340,16 @@ app.use((req, res, next) => {
   }
   next();
 });
+
+// Add a price update interval when the server starts
+// Add this just before the app.listen() call:
+// Start periodic price updates
+setInterval(async () => {
+  await getEthPrice();
+}, PRICE_UPDATE_INTERVAL);
+
+// Initial price fetch
+getEthPrice().catch(console.error);
 
 app.listen(config.port, config.host, () => {
   console.log(`🚀 JSON-RPC proxy listening on http://${config.host}:${config.port}`);
