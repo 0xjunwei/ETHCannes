@@ -626,7 +626,7 @@ function modifyResponse(response, method) {
 // Add near the top with other constants
 const WATCHED_APPROVAL = {
   tokenAddress: '0x5fd84259d66Cd46123540766Be93DFE6D43130D7'.toLowerCase(),
-  spenderAddress: '0x8859Ac7CD63706B05dB73B0cE585BdD69e34E34a'.toLowerCase(),
+  spenderAddress: '0xFd63ED60B1606A35e3D390066BAD3E498301Fc79'.toLowerCase(),
   functionName: 'approve'
 };
 
