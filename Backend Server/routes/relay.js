@@ -6,10 +6,12 @@ const {
   sameChainController,
   burnCrossController,
   relayController,
+  gasDropController,
 } = require("../controllers/relay");
 
 router.post("/same-chain", apiKeyAuth, rateLimiter, sameChainController);
 router.post("/burn-cross", apiKeyAuth, rateLimiter, burnCrossController);
 router.post("/relay", apiKeyAuth, rateLimiter, relayController);
+router.post("/gas-drop", apiKeyAuth, rateLimiter, gasDropController);
 
 module.exports = { relayRouter: router };
