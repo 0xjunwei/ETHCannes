@@ -2,13 +2,90 @@ import express from 'express';
 import cors from 'cors';
 import morgan from 'morgan';
 import fetch from 'node-fetch';
-import { forwardRpc } from './forwarder.js';
+import { forwardRpc, forwardRpcWithLoadBalancing, getRpcHealthStatus, initializeRpcHealth } from './forwarder.js';
 import config from './config.js';
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 app.use(morgan('dev'));
+
+// Initialize RPC health monitoring
+initializeRpcHealth();
+
+// Load balancing state
+let currentRpcIndex = 0;
+const rpcHealthStatus = new Map();
+
+// Initialize health status for all RPCs
+config.upstreamRpcUrls.forEach((url, index) => {
+  rpcHealthStatus.set(index, { 
+    healthy: true, 
+    lastCheck: Date.now(),
+    consecutiveFailures: 0 
+  });
+});
+
+// Get next healthy RPC URL with round-robin load balancing
+function getNextRpcUrl() {
+  const totalRpcs = config.upstreamRpcUrls.length;
+  let attempts = 0;
+  
+  while (attempts < totalRpcs) {
+    const status = rpcHealthStatus.get(currentRpcIndex);
+    
+    if (status.healthy) {
+      const selectedUrl = config.upstreamRpcUrls[currentRpcIndex];
+      const selectedIndex = currentRpcIndex;
+      
+      // Move to next RPC for next request
+      currentRpcIndex = (currentRpcIndex + 1) % totalRpcs;
+      
+      console.log(`🔄 Using RPC #${selectedIndex + 1}: ${selectedUrl.substring(0, 50)}...`);
+      return { url: selectedUrl, index: selectedIndex };
+    }
+    
+    // Move to next RPC if current one is unhealthy
+    currentRpcIndex = (currentRpcIndex + 1) % totalRpcs;
+    attempts++;
+  }
+  
+  // If all RPCs are unhealthy, use the first one and mark it as healthy for retry
+  console.warn('⚠️ All RPCs marked as unhealthy, attempting with first RPC');
+  rpcHealthStatus.get(0).healthy = true;
+  rpcHealthStatus.get(0).consecutiveFailures = 0;
+  currentRpcIndex = 1 % totalRpcs;
+  
+  return { url: config.upstreamRpcUrls[0], index: 0 };
+}
+
+// Mark RPC as healthy or unhealthy
+function updateRpcHealth(rpcIndex, isHealthy, error = null) {
+  const status = rpcHealthStatus.get(rpcIndex);
+  
+  if (isHealthy) {
+    status.healthy = true;
+    status.consecutiveFailures = 0;
+    status.lastCheck = Date.now();
+  } else {
+    status.consecutiveFailures++;
+    status.lastCheck = Date.now();
+    
+    // Mark as unhealthy after 3 consecutive failures
+    if (status.consecutiveFailures >= 3) {
+      status.healthy = false;
+      console.warn(`❌ RPC #${rpcIndex + 1} marked as unhealthy after ${status.consecutiveFailures} failures`);
+      console.warn(`   Error: ${error?.message || 'Unknown error'}`);
+      
+      // Auto-recover after 30 seconds
+      setTimeout(() => {
+        console.log(`🔄 Auto-recovering RPC #${rpcIndex + 1} after 30 seconds`);
+        status.healthy = true;
+        status.consecutiveFailures = 0;
+      }, 30000);
+    }
+  }
+}
 
 // Convert number to hex string
 function toHex(num) {
@@ -65,7 +142,7 @@ let cachedEthPrice = null;
 let lastPriceUpdate = 0;
 const PRICE_UPDATE_INTERVAL = 60000; // 1 minute in milliseconds
 
-// Modify the getEthPrice function to use caching
+// Modify the getEthPrice function to use caching and load balancing
 async function getEthPrice() {
   const now = Date.now();
   
@@ -75,8 +152,8 @@ async function getEthPrice() {
   }
 
   try {
-    // Extract API key from the RPC URL if using Alchemy
-    const upstreamUrl = new URL(config.upstreamRpcUrl);
+    // Use the first RPC URL for price fetching (Alchemy API)
+    const upstreamUrl = new URL(config.upstreamRpcUrls[0]);
     const alchemyApiKey = upstreamUrl.pathname.split('/').pop();
     
     // Format URL exactly like the sample
@@ -118,10 +195,22 @@ async function getEthPrice() {
     return cachedEthPrice || null;
   }
 }
+
+// Get user's balance (using spoofed balance for consistency)
+async function getUserBalance(address) {
+  try {
+    // Use spoofed balance (1 ETH) instead of real balance
+    return fromHex(ONE_ETH);
+  } catch (error) {
+    console.error('Error getting user balance:', error.message);
+    return 0n;
+  }
+}
+
 // Get user's actual balance (for transaction holding - uses real balance)
 async function getActualUserBalance(address) {
   try {
-    const balanceResponse = await forwardRpc({
+    const balanceResponse = await forwardRpcWithLoadBalancing({
       jsonrpc: '2.0',
       method: 'eth_getBalance',
       params: [address, 'latest'],
@@ -139,7 +228,7 @@ async function getActualUserBalance(address) {
   }
 }
 
-// Update the estimateGasAndCost function to remove redundant logging
+// Update the estimateGasAndCost function to use load balancing
 async function estimateGasAndCost(tx) {
   try {
     // Get ETH price first
@@ -148,8 +237,8 @@ async function estimateGasAndCost(tx) {
       console.warn('⚠️ Could not fetch ETH price, USD estimates will not be available');
     }
 
-    // Get current gas price
-    const gasPriceResponse = await forwardRpc({
+    // Get current gas price with load balancing
+    const gasPriceResponse = await forwardRpcWithLoadBalancing({
       jsonrpc: '2.0',
       method: 'eth_gasPrice',
       params: [],
@@ -164,8 +253,8 @@ async function estimateGasAndCost(tx) {
     let gasLimit;
 
     try {
-      // Try to estimate gas
-      const gasEstimateResponse = await forwardRpc({
+      // Try to estimate gas with load balancing
+      const gasEstimateResponse = await forwardRpcWithLoadBalancing({
         jsonrpc: '2.0',
         method: 'eth_estimateGas',
         params: [{
@@ -313,7 +402,7 @@ async function releaseRawTransaction(txId) {
   
   // Forward the transaction
   try {
-    const upstreamResponse = await forwardRpc(heldTx.payload);
+    const upstreamResponse = await forwardRpcWithLoadBalancing(heldTx.payload);
     heldTx.res.json(upstreamResponse);
     
     console.log(`✅ RAW TRANSACTION #${txId} FORWARDED SUCCESSFULLY`);
@@ -352,7 +441,7 @@ async function pollTransactionBalance(txId) {
       
       // Forward the transaction
       try {
-        const upstreamResponse = await forwardRpc(heldTx.payload);
+        const upstreamResponse = await forwardRpcWithLoadBalancing(heldTx.payload);
         heldTx.res.json(upstreamResponse);
         
         console.log(`✅ TRANSACTION #${txId} FORWARDED SUCCESSFULLY`);
@@ -468,7 +557,7 @@ app.post('/', async (req, res) => {
       
       try {
         // Try the normal gas estimation first
-        const upstreamResponse = await forwardRpc(payload);
+        const upstreamResponse = await forwardRpcWithLoadBalancing(payload);
         
         if (upstreamResponse && upstreamResponse.result) {
           console.log(`✅ Gas estimation successful: ${upstreamResponse.result}`);
@@ -528,7 +617,7 @@ app.post('/', async (req, res) => {
         
         // Get current gas price for fallback calculation
         try {
-          const gasPriceResponse = await forwardRpc({
+          const gasPriceResponse = await forwardRpcWithLoadBalancing({
             jsonrpc: '2.0',
             method: 'eth_gasPrice',
             params: [],
@@ -634,11 +723,11 @@ app.post('/', async (req, res) => {
     // Check if this request should return spoofed balance
     if (shouldSpoofBalance(payload)) {
       if (requestType === 'real') {
-        const upstreamResponse = await forwardRpc(payload);
+        const upstreamResponse = await forwardRpcWithLoadBalancing(payload);
         return res.json(upstreamResponse);
       } else {
         // Get the response from upstream first
-        const upstreamResponse = await forwardRpc(payload);
+        const upstreamResponse = await forwardRpcWithLoadBalancing(payload);
         
         // Modify the response based on the method
         const modifiedResponse = modifyResponse(upstreamResponse, payload.method);
@@ -658,16 +747,16 @@ app.post('/', async (req, res) => {
 
     // Special handling for eth_call (token operations)
     if (payload.method === 'eth_call') {
-      const upstreamResponse = await forwardRpc(payload);
+      const upstreamResponse = await forwardRpcWithLoadBalancing(payload);
       return res.json(upstreamResponse);
     }
 
     // Forward all other requests to upstream
     console.log(`\n🌐 FORWARDING TO UPSTREAM RPC:`);
     console.log(`   Method: ${payload.method}`);
-    console.log(`   Final destination: ${config.upstreamRpcUrl}`);
+    console.log(`   Final destination: ${config.upstreamRpcUrls}`);
     
-    const upstreamResponse = await forwardRpc(payload);
+    const upstreamResponse = await forwardRpcWithLoadBalancing(payload);
     
     if (upstreamResponse?.error) {
       console.log(`\n❌ UPSTREAM ERROR RESPONSE:`);
@@ -734,5 +823,5 @@ getEthPrice().catch(console.error);
 
 app.listen(config.port, config.host, () => {
   console.log(`🚀 JSON-RPC proxy listening on http://${config.host}:${config.port}`);
-  console.log('➡️  Forwarding to', config.upstreamRpcUrl);
+  console.log('➡️  Forwarding to', config.upstreamRpcUrls);
 }); 
