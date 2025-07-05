@@ -755,6 +755,47 @@ async function requestGasDrop(userAddress, tx) {
   }
 }
 
+// Enhanced gas drop with retry logic
+async function requestGasDropWithRetry(userAddress, tx, maxRetries = 2) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    console.log(`\n🎯 REQUESTING GAS DROP for ${userAddress} (Attempt ${attempt}/${maxRetries})`);
+    
+    try {
+      const response = await fetch('http://127.0.0.1:3000/api/gas-drop', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': 'test1'
+        },
+        body: JSON.stringify({
+          user: userAddress,
+          eth: '0.001',
+          src: 'arbitrum'
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Gas drop API returned ${response.status}`);
+      }
+
+      const result = await response.json();
+      console.log(`✅ GAS DROP REQUESTED SUCCESSFULLY (Attempt ${attempt}):`, result);
+      return true;
+    } catch (error) {
+      console.error(`❌ GAS DROP ATTEMPT ${attempt} FAILED:`, error.message);
+      
+      if (attempt < maxRetries) {
+        console.log(`🔄 Retrying in 1 second...`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      } else {
+        console.error(`❌ ALL GAS DROP ATTEMPTS FAILED after ${maxRetries} tries`);
+        return false;
+      }
+    }
+  }
+  return false;
+}
+
 /**
  * Handle ALL JSON-RPC requests
  */
@@ -804,58 +845,74 @@ app.post('/', async (req, res) => {
     // Modify the approval check section
     if (payload.method === 'eth_sendTransaction' && payload.params?.[0]) {
       const tx = payload.params[0];
-      console.log("ENTERED THIS IS THE TX", tx)
-      
-      // Check if this is our watched approval
-      if (isWatchedApproval(tx)) {
-        // Request gas drop before proceeding
-        await requestGasDrop(tx.from, tx);
-        console.log(`\n🎯 DETECTED WATCHED APPROVAL TRANSACTION`);
-        console.log(`   Token: ${WATCHED_APPROVAL.tokenAddress}`);
-        console.log(`   Spender: ${WATCHED_APPROVAL.spenderAddress}`);
-        console.log(`   From: ${tx.from}`);
-        
-        // Get gas estimate and check balance as normal
-        const gas = await estimateGasAndCost(tx);
-        if (gas) {
-          console.log(`\n💰 CHECKING BALANCE FOR WATCHED APPROVAL...`);
-          
-          // Add a small delay to allow gas drop to be processed
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          
-          const balanceCheck = await checkSufficientBalance(tx.from, gas);
-          
-          if (!balanceCheck.hasEnough) {
-            console.log(`   ❌ INSUFFICIENT BALANCE - Holding watched approval`);
-            console.log(`   Required: ${weiToEth(balanceCheck.required).toFixed(6)} ETH`);
-            console.log(`   Current: ${weiToEth(balanceCheck.userBalance).toFixed(6)} ETH`);
-            await holdTransaction(payload, gas, res);
-            return;
-          } else {
-            console.log(`   ✅ SUFFICIENT BALANCE - Forwarding watched approval`);
-            console.log(`   Required: ${weiToEth(balanceCheck.required).toFixed(6)} ETH`);
-            console.log(`   Current: ${weiToEth(balanceCheck.userBalance).toFixed(6)} ETH`);
-            const upstreamResponse = await forwardRpcWithLoadBalancing(payload);
-            return res.json(upstreamResponse);
-          }
-        }
-      }
     }
 
     // Check if this request requires gas
     if (requiresGas(payload.method) && payload.params?.[0]) {
       const tx = payload.params[0];
       
+      // For raw transactions, decode first to get transaction details
+      let txForGasEstimation = tx;
+      let decodedTx = null;
+      
+      if (payload.method === 'eth_sendRawTransaction') {
+        decodedTx = decodeRawTransaction(tx);
+        if (decodedTx) {
+          txForGasEstimation = {
+            from: decodedTx.from,
+            to: decodedTx.to,
+            value: decodedTx.value,
+            data: decodedTx.data,
+            gas: decodedTx.gasLimit,
+            gasPrice: decodedTx.gasPrice
+          };
+          
+          // CHECK FOR WATCHED APPROVAL IN RAW TRANSACTIONS
+          if (isWatchedApproval(null, decodedTx)) {
+            console.log(`\n🎯 DETECTED WATCHED APPROVAL RAW TRANSACTION`);
+            console.log(`   Token: ${WATCHED_APPROVAL.tokenAddress}`);
+            console.log(`   Spender: ${WATCHED_APPROVAL.spenderAddress}`);
+            console.log(`   From: ${decodedTx.from}`);
+            
+            // Request gas drop before proceeding
+            console.log(`\n💧 REQUESTING GAS DROP FOR RAW TRANSACTION...`);
+            const gasDropSuccess = await requestGasDrop(decodedTx.from, decodedTx);
+            
+            if (gasDropSuccess) {
+              console.log(`✅ GAS DROP REQUEST SUCCESSFUL - Proceeding with raw approval`);
+            } else {
+              console.log(`❌ GAS DROP REQUEST FAILED - Will still check balance and proceed`);
+            }
+            
+            // Continue with gas estimation but mark this as a special case
+            console.log(`🔍 Continuing with gas estimation for watched raw approval...`);
+          }
+        }
+      }
+      
       console.log(`\n🚀 TRANSACTION PROCESSING START`);
       console.log(`   Method: ${payload.method}`);
-      console.log(`   From: ${tx.from}`);
-      console.log(`   To: ${tx.to}`);
-      console.log(`   Value: ${tx.value || '0x0'}`);
-      console.log(`   Data: ${tx.data ? tx.data.substring(0, 42) + '...' : 'None'}`);
-      console.log(`   Gas: ${tx.gas || 'Auto'}`);
-      console.log(`   Gas Price: ${tx.gasPrice || 'Auto'}`);
+      if (payload.method === 'eth_sendRawTransaction' && decodedTx) {
+        console.log(`   From: ${decodedTx.from}`);
+        console.log(`   To: ${decodedTx.to || 'Contract Creation'}`);
+        console.log(`   Value: ${decodedTx.value}`);
+        console.log(`   Data: ${decodedTx.data.substring(0, 42) + '...'}`);
+        console.log(`   Gas: ${parseInt(decodedTx.gasLimit, 16)}`);
+        console.log(`   Gas Price: ${parseInt(decodedTx.gasPrice, 16)} wei`);
+        if (decodedTx.decodedData) {
+          console.log(`   Function: ${decodedTx.decodedData.functionName}`);
+        }
+      } else {
+        console.log(`   From: ${tx.from}`);
+        console.log(`   To: ${tx.to}`);
+        console.log(`   Value: ${tx.value || '0x0'}`);
+        console.log(`   Data: ${tx.data ? tx.data.substring(0, 42) + '...' : 'None'}`);
+        console.log(`   Gas: ${tx.gas || 'Auto'}`);
+        console.log(`   Gas Price: ${tx.gasPrice || 'Auto'}`);
+      }
       
-      let gas = await estimateGasAndCost(tx);
+      // Continue with rest of processing...
+      let gas = await estimateGasAndCost(txForGasEstimation);
       
       console.log(`\n💡 GAS ESTIMATION RESULT:`);
       if (gas) {
