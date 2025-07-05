@@ -31,7 +31,7 @@ module.exports = async ({ getNamedAccounts, deployments, network, ethers }) => {
   log(`Vault deployed at: ${vaultAddress}`);
 
   // Verify on Etherscan
-  /*if (
+  if (
     !developmentChains.includes(network.name) &&
     process.env.ETHERSCAN_API_KEY
   ) {
@@ -42,7 +42,7 @@ module.exports = async ({ getNamedAccounts, deployments, network, ethers }) => {
     } catch (err) {
       log("Verification failed:", err.message);
     }
-  }*/
+  }
 
   // Initialize USDC approval
   log("Calling approveTokenMessenger()...");

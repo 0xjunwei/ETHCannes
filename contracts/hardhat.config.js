@@ -4,6 +4,7 @@ require("hardhat-deploy");
 
 const ARBITRUM_SEPOLIA_RPC_URL = process.env.ARBITRUM_SEPOLIA_RPC_URL || "";
 const BASE_SEPOLIA_RPC_URL = process.env.BASE_SEPOLIA_RPC_URL || "";
+const OP_SEPOLIA_RPC_URL = process.env.OP_SEPOLIA_RPC_URL;
 const PRIVATE_KEY = process.env.PRIVATE_KEY || "";
 
 /** @type import('hardhat/config').HardhatUserConfig */
@@ -28,6 +29,11 @@ module.exports = {
       url: BASE_SEPOLIA_RPC_URL,
       accounts: [PRIVATE_KEY],
       chainId: 84532,
+    },
+    opSepolia: {
+      url: OP_SEPOLIA_RPC_URL,
+      accounts: [PRIVATE_KEY],
+      chainId: 11155420,
     },
   },
   etherscan: {

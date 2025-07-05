@@ -102,6 +102,7 @@ contract Node is Ownable, AccessControl {
         tokenMessenger = ITokenMessengerV2(_tokenMessenger);
         messageTransmitter = IMessageTransmitterV2(_messageTransmitter);
         priceFeed = AggregatorV3Interface(_priceFeed);
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(AUTHORIZED, msg.sender);
     }
 
@@ -203,7 +204,20 @@ contract Node is Ownable, AccessControl {
         uint256 remaining = usdc.allowance(user, address(this));
         usdcForGasRemaining[user] = remaining;
 
-        // pack hook data
+        // Send USDC to dest chain, as we be dispersing gas token, it makes better sense to swap usdc -> gas to replenish on the dest chain
+        // better liquidity, and in case it is not eth, but E.g usdc -> AVAX, swapping on avax be btr slippage than on arbitrum
+        // Allow normal transfers as it does not matter, 0 fee
+        tokenMessenger.depositForBurn(
+            usdcAmt,
+            destinationDomain,
+            vaultRecipient,
+            address(usdc),
+            bytes32(0), // allow any caller on destination
+            0,
+            2000
+        );
+
+        // pack message data
         bytes memory hookData = abi.encode(user, ethGasWei);
 
         // call the MessageTransmitter directly instead of TokenMessenger
@@ -238,6 +252,20 @@ contract Node is Ownable, AccessControl {
     ) external onlyOwner {
         require(vaultAddr != address(0), "Vault: zero address");
         isAuthorizedVault[vaultAddr] = authorized;
+    }
+
+    /// Add an address to AUTHORIZED set
+    function addAuthorizedCaller(
+        address account
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        grantRole(AUTHORIZED, account);
+    }
+
+    ///Remove an address from AUTHORIZED set
+    function removeAuthorizedCaller(
+        address account
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        revokeRole(AUTHORIZED, account);
     }
 
     // Handle the messages from hooks, needs to adjust the security so only transmitter can call this and sender from my vaults
