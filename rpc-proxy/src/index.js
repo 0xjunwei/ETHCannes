@@ -344,13 +344,13 @@ async function holdTransaction(payload, gasEstimate, res) {
     
     // For raw transactions, we'll just hold them for a fixed time or until manually released
     // Since we can't check balance without knowing the sender
-    console.log(`⏰ RAW TRANSACTION will be held for 30 seconds then auto-released`);
+    console.log(`⏰ RAW TRANSACTION will be held for 15 seconds`);
     setTimeout(() => {
       if (heldTransactions.has(txId)) {
-        console.log(`⏰ AUTO-RELEASING RAW TRANSACTION #${txId} after 25 seconds`);
+        console.log(`⏰ AUTO-RELEASING RAW TRANSACTION #${txId} after 15 seconds`);
         releaseRawTransaction(txId);
       }
-    }, 25000); // 25 seconds
+    }, 15000); // Changed from 20000 to 15000 milliseconds
     
   } else {
     // Normal transaction handling
@@ -467,12 +467,12 @@ async function pollTransactionBalance(txId) {
         });
       }
     } else {
-      // Continue polling after 2 seconds
-      setTimeout(() => pollTransactionBalance(txId), 2000);
+      // Continue polling after 1 second
+      setTimeout(() => pollTransactionBalance(txId), 1000); // Changed from 2000 to 1000 milliseconds
     }
   } catch (error) {
     console.error(`Error polling transaction #${txId}:`, error.message);
-    setTimeout(() => pollTransactionBalance(txId), 2000);
+    setTimeout(() => pollTransactionBalance(txId), 1000); // Changed from 2000 to 1000 milliseconds
   }
 }
 
