@@ -153,7 +153,7 @@ async function forwardRpcWithLoadBalancing(payload) {
     const { url, index } = getNextRpcUrl();
     
     try {
-      console.log(`🔄 [${attempt + 1}/${maxRetries}] Using RPC #${index + 1}: ${url.substring(0, 50)}...`);
+      console.log(`🔄 Using RPC #${index + 1}: ${url.substring(0, 50)}...`);
       
       const response = await forwardRpc(payload, url);
       

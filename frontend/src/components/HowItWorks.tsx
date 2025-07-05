@@ -15,8 +15,8 @@ const setupSteps = [
   },
   {
     id: 2,
-    title: "Approve Requirements",
-    description: "Add approvals for vaults/ requirements",
+    title: "Multi-Chain Approvals",
+    description: "Execute approvals across 3 different chains: Arbitrum Sepolia, Base Sepolia, and Optimism",
     icon: <Key className="text-green-400" size={24} />,
   },
   {
@@ -79,36 +79,93 @@ const HowItWorks = () => {
       return;
     }
 
-    // Handle approve requirements step
+    // Handle multi-chain approve requirements step
     if (stepId === 2) {
       try {
         // Set loading state
         setCompletedSteps(prev => prev.filter(id => id !== stepId));
         
-        // Then simulate and execute the approval
-        const { request } = await publicClient.simulateContract({
-          account,
-          address: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d', // USDC address
-          abi: erc20Abi,
-          functionName: 'approve',
-          args: [
-            '0x307cf6B676284afF0ec40787823ce585fA116B29', // spender (contract address)
-            BigInt('0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff') // unlimited approval
-          ]
-        });
+        // Define chain configurations with token and vault addresses
+        const chainConfigs = [
+          {
+            name: "Arbitrum Sepolia",
+            usdcAddress: "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+            vaultAddress: "0x307cf6B676284afF0ec40787823ce585fA116B29"
+          },
+          {
+            name: "Base Sepolia", 
+            usdcAddress: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+            vaultAddress: "0x96f1D2642455011aC5bEBF2cB875fc85F0Cb3691"
+          },
+          {
+            name: "Optimism",
+            usdcAddress: "0x5fd84259d66Cd46123540766Be93DFE6D43130D7",
+            vaultAddress: "0xFd63ED60B1606A35e3D390066BAD3E498301Fc79"
+          }
+        ];
+        
+        console.log(`🔗 Starting multi-chain approvals for ${chainConfigs.length} chains...`);
+        
+        let successfulApprovals = 0;
+        
+        // Execute approvals for each chain sequentially
+        for (let i = 0; i < chainConfigs.length; i++) {
+          const config = chainConfigs[i];
+          
+          try {
+            console.log(`\n📍 Processing approval ${i + 1}/${chainConfigs.length}: ${config.name}`);
+            console.log(`   USDC Token: ${config.usdcAddress}`);
+            console.log(`   Vault Spender: ${config.vaultAddress}`);
+            
+            // Simulate the approval transaction
+            const { request } = await publicClient.simulateContract({
+              account,
+              address: config.usdcAddress as `0x${string}`,
+              abi: erc20Abi,
+              functionName: 'approve',
+              args: [
+                config.vaultAddress as `0x${string}`,
+                BigInt('0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff') // unlimited approval
+              ]
+            });
 
-        // Execute the transaction
-        const txHash = await walletClient.writeContract(request);
-        console.log(txHash);
-        
-        // Wait for transaction confirmation
-        const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
-        
-        if (receipt.status === 'success') {
-          setCompletedSteps(prev => [...prev, stepId]);
+            console.log(`   ✅ Simulation successful for ${config.name}`);
+
+            // Execute the transaction
+            const txHash = await walletClient.writeContract(request);
+            console.log(`   🚀 Transaction submitted: ${txHash}`);
+            
+            // Wait for transaction confirmation
+            const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+            
+            if (receipt.status === 'success') {
+              successfulApprovals++;
+              console.log(`   ✅ Approval confirmed for ${config.name} (${successfulApprovals}/${chainConfigs.length})`);
+            } else {
+              console.error(`   ❌ Approval failed for ${config.name}: Transaction reverted`);
+            }
+            
+            // Add a small delay between transactions to avoid rate limiting
+            if (i < chainConfigs.length - 1) {
+              console.log(`   ⏳ Waiting 2 seconds before next approval...`);
+              await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+            
+          } catch (chainError) {
+            console.error(`❌ Approval failed for ${config.name}:`, chainError);
+          }
         }
+        
+        // Mark step as completed if at least one approval succeeded
+        if (successfulApprovals > 0) {
+          console.log(`\n🎉 Multi-chain approvals completed! ${successfulApprovals}/${chainConfigs.length} successful`);
+          setCompletedSteps(prev => [...prev, stepId]);
+        } else {
+          console.error('\n❌ All multi-chain approvals failed');
+        }
+        
       } catch (error) {
-        console.error('Approval failed:', error);
+        console.error('Multi-chain approval process failed:', error);
       }
       return;
     }
