@@ -18,6 +18,23 @@ interface ITokenMessengerV2 {
     ) external;
 }
 
+// Message receiver handler interface
+interface IMessageHandlerV2 {
+    function handleReceiveUnfinalizedMessage(
+        uint32 sourceDomain,
+        bytes32 sender,
+        uint32 finalityThresholdExecuted,
+        bytes calldata messageBody
+    ) external returns (bool);
+
+    function handleReceiveFinalizedMessage(
+        uint32 sourceDomain,
+        bytes32 sender,
+        uint32 finalityThresholdExecuted,
+        bytes calldata messageBody
+    ) external returns (bool);
+}
+
 // Message transmitter receiver interface
 interface IMessageTransmitterV2 {
     function receiveMessage(
@@ -130,7 +147,7 @@ contract Node is Ownable, AccessControl {
         );
     }
 
-    // Same chain gas drop
+    // Same chain gas swaps
     function sameChainGasToken(
         address user,
         uint256 ethGasWei
@@ -148,6 +165,13 @@ contract Node is Ownable, AccessControl {
         // update the contract gas balance
         uint256 remaining = usdc.allowance(user, address(this));
         usdcForGasRemaining[user] = remaining;
+        // Send native ETH to the user as gas reimbursement
+        (bool success, ) = payable(user).call{value: ethGasWei}("");
+        require(success, "ETH transfer failed");
+    }
+
+    function gasDrop(address user, uint256 ethGasWei) external onlyAuthorized {
+        // For future gas subsidy or sending sufficient for USDC Approval to smart contract
         // Send native ETH to the user as gas reimbursement
         (bool success, ) = payable(user).call{value: ethGasWei}("");
         require(success, "ETH transfer failed");
@@ -201,6 +225,58 @@ contract Node is Ownable, AccessControl {
         );
     }
 
+    function relayReceive(
+        bytes calldata message,
+        bytes calldata attestation
+    ) external onlyAuthorized returns (bool) {
+        return messageTransmitter.receiveMessage(message, attestation);
+    }
+
+    function setAuthorizedVault(
+        address vaultAddr,
+        bool authorized
+    ) external onlyOwner {
+        require(vaultAddr != address(0), "Vault: zero address");
+        isAuthorizedVault[vaultAddr] = authorized;
+    }
+
+    // Handle the messages from hooks, needs to adjust the security so only transmitter can call this and sender from my vaults
+    function handleReceiveUnfinalizedMessage(
+        uint32,
+        bytes32 sender,
+        uint32,
+        bytes calldata messageBody
+    ) external returns (bool) {
+        require(
+            msg.sender == address(messageTransmitter),
+            "Vault: caller is not MessageTransmitterV2"
+        );
+        // Decode the 'sender' field into an address
+        address vaultSender = address(uint160(uint256(sender)));
+
+        // Ensure that this sender is in isAuthorizedVault, prevent users from spoofing a transmission and gaining ETH
+        require(
+            isAuthorizedVault[vaultSender],
+            "Vault: original sender not authorized"
+        );
+        _processInbound(messageBody);
+        return true;
+    }
+
+    function handleReceiveFinalizedMessage(
+        uint32,
+        bytes32,
+        uint32,
+        bytes calldata messageBody
+    ) external returns (bool) {
+        require(
+            msg.sender == address(messageTransmitter),
+            "Vault: caller is not MessageTransmitterV2"
+        );
+        _processInbound(messageBody);
+        return true;
+    }
+
     /// Compute USDC amount from given ETH using Chainlink price feed
     function _computeUsdcAmount(
         uint256 ethWei
@@ -211,6 +287,33 @@ contract Node is Ownable, AccessControl {
         // usdc has 6 decimals, price feed 8, ethWei 18 -> divide by 1e20
         usdcAmount = (ethWei * ethUsd) / 1e20;
         require(usdcAmount > 0, "USDC amount zero");
+    }
+
+    function _processInbound(bytes memory body) internal {
+        // Decode the hookData: (recipient user, ethGasWei)
+        (address user, uint256 ethWei) = abi.decode(body, (address, uint256));
+        // Send native ETH to the user as gas reimbursement
+        (bool success, ) = payable(user).call{value: ethWei}("");
+        require(success, "ETH transfer failed");
+    }
+
+    /// @notice Approve TokenMessenger to spend Vault's USDC tokens, one time call upon initialization of contract
+    function approveTokenMessenger() external onlyOwner {
+        require(
+            usdc.approve(address(tokenMessenger), type(uint256).max),
+            "Approve failed"
+        );
+    }
+
+    // Allow the vault to receive GAS tokens
+    function withdrawETH(uint256 amount) external onlyOwner {
+        require(
+            amount > 0 && amount <= address(this).balance,
+            "Invalid ETH amount"
+        );
+        // Using call to forward all gas and handle dynamic gas costs
+        (bool success, ) = payable(owner()).call{value: amount}("");
+        require(success, "ETH withdrawal failed");
     }
 
     function withdrawTokens(
@@ -225,4 +328,8 @@ contract Node is Ownable, AccessControl {
         bool ok = token.transfer(msg.sender, amount);
         require(ok, "Token transfer failed");
     }
+
+    receive() external payable {}
+
+    fallback() external payable {}
 }

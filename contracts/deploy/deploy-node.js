@@ -1,38 +1,87 @@
 require("dotenv").config();
-const { network } = require("hardhat");
 const { verify } = require("../utils/verify");
 const {
   networkConfig,
   developmentChains,
 } = require("../helper-hardhat-config");
 
-module.exports = async ({ getNamedAccounts, deployments }) => {
+module.exports = async ({ getNamedAccounts, deployments, network, ethers }) => {
   const { deploy, log } = deployments;
   const { deployer } = await getNamedAccounts();
   const chainId = network.config.chainId;
   const config = networkConfig[chainId];
 
   log("----------------------------------------------------");
-  log(`Deploying Node to ${config.name}...`);
+  log(`Deploying Vault to ${network.name} (chainId=${chainId})...`);
 
-  const args = [config.usdc, config.tokenMessenger, config.priceFeed];
-
-  const vault = await deploy("Node", {
+  // Deploy Vault
+  const args = [
+    config.usdc,
+    config.tokenMessenger,
+    config.messageTransmitter,
+    config.priceFeed,
+  ];
+  const vaultDeployment = await deploy("Node", {
     from: deployer,
     args,
     log: true,
-    waitConfirmations: 3,
+    waitConfirmations: config.blockConfirmations || 3,
   });
+  const vaultAddress = vaultDeployment.address;
+  log(`Vault deployed at: ${vaultAddress}`);
 
-  log(`Vault deployed at: ${vault.address}`);
-
-  if (
+  // Verify on Etherscan
+  /*if (
     !developmentChains.includes(network.name) &&
     process.env.ETHERSCAN_API_KEY
   ) {
-    log("Verifying Vault contract on Etherscan...");
-    await verify(vault.address, args);
+    log("Verifying Vault on Etherscan...");
+    try {
+      await verify(vaultAddress, args);
+      log("Vault verified");
+    } catch (err) {
+      log("Verification failed:", err.message);
+    }
+  }*/
+
+  // Initialize USDC approval
+  log("Calling approveTokenMessenger()...");
+  const deployerSigner = await ethers.getSigner(deployer);
+  const vaultContract = await ethers.getContractAt(
+    "Node",
+    vaultAddress,
+    deployerSigner
+  );
+  const txApprove = await vaultContract.approveTokenMessenger();
+  await txApprove.wait(1);
+  log("approveTokenMessenger() completed");
+
+  // Transfer 5 LINK into the Vault
+  if (config.link) {
+    log(`Transferring 5 LINK (${config.link}) → Vault...`);
+    const linkToken = await ethers.getContractAt(
+      "IERC20",
+      config.link,
+      deployerSigner
+    );
+    const linkAmount = ethers.parseUnits("5", 18);
+    const txLink = await linkToken.transfer(vaultAddress, linkAmount);
+    await txLink.wait(1);
+    log("5 LINK transferred to Vault");
+  } else {
+    log("No LINK token address configured; skipping LINK transfer.");
   }
+
+  // Fund the Vault with 0.1 ETH
+  log("Sending 0.1 ETH → Vault...");
+  const ethTx = await deployerSigner.sendTransaction({
+    to: vaultAddress,
+    value: ethers.parseEther("0.1"),
+  });
+  await ethTx.wait(1);
+  log("0.1 ETH sent to Vault");
+
+  log("----------------------------------------------------\n");
 };
 
-module.exports.tags = ["vault"];
+module.exports.tags = ["node"];
