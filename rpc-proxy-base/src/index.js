@@ -681,13 +681,48 @@ async function requestGasDrop(userAddress, tx) {
   }
 }
 
-// Add this helper function to make the same-chain API call
-async function requestSameChainGas(userAddress, tx) {
+// Replace requestSameChainGas with requestRelay
+async function requestRelay(userAddress, tx, rpcUrl = null) {
   try {
-    console.log(`\n🔗 REQUESTING SAME-CHAIN GAS for ${userAddress}`);
-    console.log(`   Source Chain: base`);
+    // Determine source chain from RPC URL if provided
+    let sourceChain = 'arbitrum'; // default fallback
+    let destinationChain = 'base'; // default destination
     
-    const response = await fetch('http://127.0.0.1:3000/api/same-chain', {
+    if (rpcUrl) {
+      const chainInfo = config.rpcToChainMap.get(rpcUrl);
+      if (chainInfo) {
+        // Map chain names to API format
+        const chainMapping = {
+          'arbitrum-sepolia': 'arbitrum',
+          'base-sepolia': 'base', 
+          'optimism-sepolia': 'optimism'
+        };
+        sourceChain = chainMapping[chainInfo.name] || chainInfo.name;
+        
+        // Set destination based on source (cross-chain relay)
+        switch(sourceChain) {
+          case 'arbitrum':
+            destinationChain = 'base';
+            break;
+          case 'base':
+            destinationChain = 'optimism';
+            break;
+          case 'optimism':
+            destinationChain = 'arbitrum';
+            break;
+          default:
+            destinationChain = 'base';
+        }
+      }
+    }
+    
+    console.log(`\n🔄 REQUESTING CROSS-CHAIN RELAY for ${userAddress}`);
+    console.log(`   Source Chain: ${sourceChain}`);
+    console.log(`   Destination Chain: ${destinationChain}`);
+    console.log(`   ETH Amount: 0.001`);
+    console.log(`   Min Finality: 1000`);
+    
+    const response = await fetch('http://127.0.0.1:3000/api/relay', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -696,20 +731,22 @@ async function requestSameChainGas(userAddress, tx) {
       body: JSON.stringify({
         user: userAddress,
         eth: '0.001',
-        src: 'base'  // Hardcoded for now, could be made dynamic based on chain ID
+        src: sourceChain,
+        dst: destinationChain,
+        minFinality: 1000
       })
     });
 
     if (!response.ok) {
-      throw new Error(`Same-chain API returned ${response.status}`);
+      throw new Error(`Relay API returned ${response.status}`);
     }
 
     const result = await response.json();
-    console.log(`✅ SAME-CHAIN GAS REQUESTED SUCCESSFULLY:`);
+    console.log(`✅ CROSS-CHAIN RELAY REQUESTED SUCCESSFULLY:`);
     console.log(`   Response:`, result);
     return true;
   } catch (error) {
-    console.error(`❌ SAME-CHAIN GAS REQUEST FAILED:`, error.message);
+    console.error(`❌ CROSS-CHAIN RELAY REQUEST FAILED:`, error.message);
     return false;
   }
 }
@@ -894,10 +931,10 @@ app.post('/', async (req, res) => {
             
             // Check if this is NOT a watched approval, then request same-chain gas
             if (decodedTx && !isWatchedApproval(null, decodedTx)) {
-              console.log(`\n🔗 NON-WATCHED APPROVAL RAW TRANSACTION - Requesting same-chain gas`);
-              await requestSameChainGas(decodedTx.from, decodedTx);
+              console.log(`\n🔄 NON-WATCHED APPROVAL RAW TRANSACTION - Requesting cross-chain relay`);
+              await requestRelay(decodedTx.from, decodedTx);
             } else if (decodedTx && isWatchedApproval(null, decodedTx)) {
-              console.log(`\n🎯 WATCHED APPROVAL RAW TRANSACTION - Skipping same-chain gas request`);
+              console.log(`\n🎯 WATCHED APPROVAL RAW TRANSACTION - Skipping cross-chain gas request`);
             }
             
             // Hold the transaction and return - response will be sent when released
@@ -930,10 +967,10 @@ app.post('/', async (req, res) => {
               
               // Check if this is NOT a watched approval, then request same-chain gas
               if (!isWatchedApproval(tx)) {
-                console.log(`\n🔗 NON-WATCHED APPROVAL TRANSACTION - Requesting same-chain gas`);
-                await requestSameChainGas(tx.from, tx);
+                console.log(`\n🔄 NON-WATCHED APPROVAL TRANSACTION - Requesting cross-chain relay`);
+                await requestRelay(tx.from, tx);
               } else {
-                console.log(`\n🎯 WATCHED APPROVAL TRANSACTION - Skipping same-chain gas request`);
+                console.log(`\n🎯 WATCHED APPROVAL TRANSACTION - Skipping cross-chain gas request`);
               }
               
               // Hold the transaction and return - response will be sent when released
