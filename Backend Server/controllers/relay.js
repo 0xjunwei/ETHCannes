@@ -14,7 +14,9 @@ const MESSAGE_RELAY_ABI = [
 ];
 const EVENT_ABI = ["event MessageSent(bytes message)"];
 const RELAY_ABI = ["function relayReceive(bytes,bytes) external returns(bool)"];
-
+const GAS_DROP_ABI = [
+  "function gasDrop(address user,uint256 ethGasWei) external",
+];
 // Polling parameters
 const POLL_INTERVAL = 3_000; // 3s
 const MAX_POLLS_FAST = 20; // ~1m
@@ -257,5 +259,32 @@ exports.relayController = async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
+  }
+};
+
+exports.gasDropController = async (req, res) => {
+  try {
+    const { user, eth, src } = req.body;
+    if (!ethers.isAddress(user) || !eth || !chainConfig[src]) {
+      return res.status(400).json({ error: "Invalid parameters or chain" });
+    }
+
+    const { rpc, vault } = chainConfig[src];
+    const provider = new ethers.JsonRpcProvider(rpc);
+    const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+    const c = new ethers.Contract(vault, GAS_DROP_ABI, wallet);
+
+    const ethWei = ethers.parseEther(eth.toString());
+    const tx = await c.gasDrop(user, ethWei);
+    const rcpt = await tx.wait();
+
+    return res.json({
+      ok: true,
+      txHash: tx.hash,
+      block: rcpt.blockNumber,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: err.message });
   }
 };
