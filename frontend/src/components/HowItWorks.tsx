@@ -4,6 +4,7 @@ import { Check, Network, Key, Wallet, Zap, ArrowRight, Coins, Plus } from 'lucid
 import { useWallet } from '../contexts/WalletContext';
 import { publicClient, walletClient, account } from '../config/config';
 import { erc20Abi } from 'viem';
+import axios from 'axios';
 
 const setupSteps = [
   {
@@ -84,7 +85,7 @@ const HowItWorks = () => {
         // Set loading state
         setCompletedSteps(prev => prev.filter(id => id !== stepId));
         
-        // Simulate and execute the approval
+        // Then simulate and execute the approval
         const { request } = await publicClient.simulateContract({
           account,
           address: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d', // USDC address
@@ -98,18 +99,16 @@ const HowItWorks = () => {
 
         // Execute the transaction
         const txHash = await walletClient.writeContract(request);
-        console.log(txHash)
+        console.log(txHash);
         
         // Wait for transaction confirmation
         const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
         
         if (receipt.status === 'success') {
-          // Mark step as complete
           setCompletedSteps(prev => [...prev, stepId]);
         }
       } catch (error) {
         console.error('Approval failed:', error);
-        // You might want to show an error message to the user here
       }
       return;
     }

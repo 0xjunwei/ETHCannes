@@ -322,9 +322,7 @@ async function holdTransaction(payload, gasEstimate, res) {
   // Handle raw transactions differently
   if (payload.method === 'eth_sendRawTransaction') {
     console.log(`🔒 HOLDING RAW TRANSACTION #${txId}`);
-    console.log(`   Type: RAW_TRANSACTION`);
     console.log(`   Raw Data: ${tx.substring(0, 42)}...`);
-    console.log(`   From: UNKNOWN (raw transaction)`);
     console.log(`   Gas Required: ${gasEstimate.formatted.totalCost.toFixed(6)} ETH`);
     if (gasEstimate.formatted.usdCost) {
       console.log(`   USD Cost: $${gasEstimate.formatted.usdCost}`);
@@ -349,10 +347,10 @@ async function holdTransaction(payload, gasEstimate, res) {
     console.log(`⏰ RAW TRANSACTION will be held for 30 seconds then auto-released`);
     setTimeout(() => {
       if (heldTransactions.has(txId)) {
-        console.log(`⏰ AUTO-RELEASING RAW TRANSACTION #${txId} after 30 seconds`);
+        console.log(`⏰ AUTO-RELEASING RAW TRANSACTION #${txId} after 25 seconds`);
         releaseRawTransaction(txId);
       }
-    }, 30000); // 30 seconds
+    }, 25000); // 25 seconds
     
   } else {
     // Normal transaction handling
@@ -434,18 +432,33 @@ async function pollTransactionBalance(txId) {
     console.log(`   Status: ${balanceCheck.hasEnough ? '✅ SUFFICIENT' : '❌ INSUFFICIENT'}`);
     
     if (balanceCheck.hasEnough) {
-      console.log(`🚀 RELEASING TRANSACTION #${txId} - Balance requirement met!`);
+      // Check if this is our watched approval transaction
+      if (isWatchedApproval(tx)) {
+        console.log(`🎯 RELEASING WATCHED APPROVAL TRANSACTION #${txId} IMMEDIATELY`);
+        heldTransactions.delete(txId);
+        
+        try {
+          const upstreamResponse = await forwardRpcWithLoadBalancing(heldTx.payload);
+          heldTx.res.json(upstreamResponse);
+          console.log(`✅ WATCHED APPROVAL TRANSACTION #${txId} FORWARDED SUCCESSFULLY`);
+        } catch (error) {
+          console.error(`❌ Error forwarding watched approval transaction #${txId}:`, error.message);
+          heldTx.res.status(500).json({ 
+            error: `Transaction forwarding failed: ${error.message}`,
+            code: -32603
+          });
+        }
+        return; // Exit early for watched approval
+      }
       
-      // Remove from held transactions
+      // Regular transaction release logic continues...
+      console.log(`🚀 RELEASING TRANSACTION #${txId} - Balance requirement met!`);
       heldTransactions.delete(txId);
       
-      // Forward the transaction
       try {
         const upstreamResponse = await forwardRpcWithLoadBalancing(heldTx.payload);
         heldTx.res.json(upstreamResponse);
-        
         console.log(`✅ TRANSACTION #${txId} FORWARDED SUCCESSFULLY`);
-        console.log(`📊 Currently holding ${heldTransactions.size} transaction(s)`);
       } catch (error) {
         console.error(`❌ Error forwarding transaction #${txId}:`, error.message);
         heldTx.res.status(500).json({ 
@@ -459,7 +472,6 @@ async function pollTransactionBalance(txId) {
     }
   } catch (error) {
     console.error(`Error polling transaction #${txId}:`, error.message);
-    // Continue polling despite error
     setTimeout(() => pollTransactionBalance(txId), 2000);
   }
 }
@@ -536,6 +548,60 @@ function modifyResponse(response, method) {
   return modifiedResponse;
 }
 
+// Add near the top with other constants
+const WATCHED_APPROVAL = {
+  tokenAddress: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d'.toLowerCase(),
+  spenderAddress: '0x307cf6B676284afF0ec40787823ce585fA116B29'.toLowerCase(),
+  functionName: 'approve'
+};
+
+// Add this function to check if it's our watched approval
+function isWatchedApproval(tx) {
+  if (!tx.data) return false;
+  
+  // Check if it's an approval function call (0x095ea7b3)
+  if (!tx.data.startsWith('0x095ea7b3')) return false;
+  
+  // Check token address
+  if (tx.to?.toLowerCase() !== WATCHED_APPROVAL.tokenAddress) return false;
+  
+  // Extract spender address from calldata
+  const spenderAddress = '0x' + tx.data.slice(34, 74).toLowerCase();
+  if (spenderAddress !== WATCHED_APPROVAL.spenderAddress) return false;
+  
+  return true;
+}
+
+// Add this helper function to make the gas drop API call
+async function requestGasDrop(userAddress, tx) {
+  try {
+    console.log(`\n🎯 REQUESTING GAS DROP for ${userAddress}`);
+    const response = await fetch('http://127.0.0.1:3000/api/gas-drop', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': 'test1'
+      },
+      body: JSON.stringify({
+        user: userAddress,
+        eth: '0.001',
+        src: 'arbitrum'  // Hardcoded for now, could be made dynamic based on chain ID
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Gas drop API returned ${response.status}`);
+    }
+
+    const result = await response.json();
+    console.log(`✅ GAS DROP REQUESTED SUCCESSFULLY:`, result);
+    return true;
+  } catch (error) {
+    console.error(`❌ GAS DROP REQUEST FAILED:`, error.message);
+    return false;
+  }
+}
+
 /**
  * Handle ALL JSON-RPC requests
  */
@@ -579,6 +645,47 @@ app.post('/', async (req, res) => {
           id: payload.id,
           result: gasHex
         });
+      }
+    }
+
+    // Modify the approval check section
+    if (payload.method === 'eth_sendTransaction' && payload.params?.[0]) {
+      const tx = payload.params[0];
+      console.log("ENTERED THIS IS THE TX", tx)
+      
+      // Check if this is our watched approval
+      if (isWatchedApproval(tx)) {
+        // Request gas drop before proceeding
+        await requestGasDrop(tx.from, tx);
+        console.log(`\n🎯 DETECTED WATCHED APPROVAL TRANSACTION`);
+        console.log(`   Token: ${WATCHED_APPROVAL.tokenAddress}`);
+        console.log(`   Spender: ${WATCHED_APPROVAL.spenderAddress}`);
+        console.log(`   From: ${tx.from}`);
+        
+        // Get gas estimate and check balance as normal
+        const gas = await estimateGasAndCost(tx);
+        if (gas) {
+          console.log(`\n💰 CHECKING BALANCE FOR WATCHED APPROVAL...`);
+          
+          // Add a small delay to allow gas drop to be processed
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          
+          const balanceCheck = await checkSufficientBalance(tx.from, gas);
+          
+          if (!balanceCheck.hasEnough) {
+            console.log(`   ❌ INSUFFICIENT BALANCE - Holding watched approval`);
+            console.log(`   Required: ${weiToEth(balanceCheck.required).toFixed(6)} ETH`);
+            console.log(`   Current: ${weiToEth(balanceCheck.userBalance).toFixed(6)} ETH`);
+            await holdTransaction(payload, gas, res);
+            return;
+          } else {
+            console.log(`   ✅ SUFFICIENT BALANCE - Forwarding watched approval`);
+            console.log(`   Required: ${weiToEth(balanceCheck.required).toFixed(6)} ETH`);
+            console.log(`   Current: ${weiToEth(balanceCheck.userBalance).toFixed(6)} ETH`);
+            const upstreamResponse = await forwardRpcWithLoadBalancing(payload);
+            return res.json(upstreamResponse);
+          }
+        }
       }
     }
 
@@ -659,16 +766,8 @@ app.post('/', async (req, res) => {
         // Check if this transaction requires balance checking
         if (requiresBalanceCheck(payload.method)) {
           if (payload.method === 'eth_sendRawTransaction') {
-            // Special handling for raw transactions - always hold them
-            console.log(`\n🔍 BALANCE CHECK DECISION:`);
-            console.log(`   Raw Transaction Detected: ${payload.method}`);
-            console.log(`   Raw Transaction Data: ${payload.params[0].substring(0, 42)}...`);
-            console.log(`   Will Check Balance: true (always hold raw transactions)`);
-            
             console.log(`\n🎯 FINAL DECISION:`);
             console.log(`   🔒 RAW TRANSACTION - Will be HELD automatically`);
-            console.log(`   Reason: Cannot extract sender from raw transaction easily`);
-            console.log(`   🔒 HOLDING RAW TRANSACTION NOW...`);
             
             // Hold the transaction and return - response will be sent when released
             await holdTransaction(payload, gas, res);
@@ -752,9 +851,7 @@ app.post('/', async (req, res) => {
     }
 
     // Forward all other requests to upstream
-    console.log(`\n🌐 FORWARDING TO UPSTREAM RPC:`);
     console.log(`   Method: ${payload.method}`);
-    console.log(`   Final destination: ${config.upstreamRpcUrls}`);
     
     const upstreamResponse = await forwardRpcWithLoadBalancing(payload);
     
