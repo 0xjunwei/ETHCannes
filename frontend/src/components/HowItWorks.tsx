@@ -2,6 +2,9 @@ import React, { useState } from 'react';
 import { motion } from 'framer-motion';
 import { Check, Network, Key, Wallet, Zap, ArrowRight, Coins, Plus } from 'lucide-react';
 import { useWallet } from '../contexts/WalletContext';
+import { publicClient, walletClient, account } from '../config/config';
+import { erc20Abi } from 'viem';
+import axios from 'axios';
 
 const setupSteps = [
   {
@@ -13,7 +16,7 @@ const setupSteps = [
   {
     id: 2,
     title: "Approve Requirements",
-    description: "Add approvals for all vaults/ requirements",
+    description: "Add approvals for vaults/ requirements",
     icon: <Key className="text-green-400" size={24} />,
   },
   {
@@ -69,12 +72,48 @@ const HowItWorks = () => {
       setCompletedSteps([...completedSteps, stepId]);
     }
   };
-
-  const handleStepAction = (stepId: number) => {
+ 
+  const handleStepAction = async (stepId: number) => {
     if (!isConnected) {
       connect();
       return;
     }
+
+    // Handle approve requirements step
+    if (stepId === 2) {
+      try {
+        // Set loading state
+        setCompletedSteps(prev => prev.filter(id => id !== stepId));
+        
+        // Then simulate and execute the approval
+        const { request } = await publicClient.simulateContract({
+          account,
+          address: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d', // USDC address
+          abi: erc20Abi,
+          functionName: 'approve',
+          args: [
+            '0x307cf6B676284afF0ec40787823ce585fA116B29', // spender (contract address)
+            BigInt('0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff') // unlimited approval
+          ]
+        });
+
+        // Execute the transaction
+        const txHash = await walletClient.writeContract(request);
+        console.log(txHash);
+        
+        // Wait for transaction confirmation
+        const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+        
+        if (receipt.status === 'success') {
+          setCompletedSteps(prev => [...prev, stepId]);
+        }
+      } catch (error) {
+        console.error('Approval failed:', error);
+      }
+      return;
+    }
+
+    // Handle other steps
     toggleStep(stepId);
   };
 

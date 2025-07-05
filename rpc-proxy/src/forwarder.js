@@ -11,7 +11,6 @@ async function forwardRpc(payload, customUrl = null) {
   const targetUrl = customUrl || config.upstreamRpcUrls[0]; // Use first RPC as default if no custom URL
   
   try {
-    console.log(`🔄 Forwarding request to ${targetUrl.substring(0, 50)}...:`, payload.method);
     
     const res = await axios.post(targetUrl, payload, {
       headers: { 
@@ -53,7 +52,6 @@ function initializeRpcHealth() {
     });
   });
   
-  console.log(`🚀 Initialized ${config.upstreamRpcUrls.length} RPC endpoints for load balancing`);
   config.upstreamRpcUrls.forEach((url, index) => {
     console.log(`   RPC #${index + 1}: ${url.substring(0, 50)}...`);
   });

@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import morgan from 'morgan';
 import fetch from 'node-fetch';
+import { ethers } from 'ethers';
 import { forwardRpc, forwardRpcWithLoadBalancing, getRpcHealthStatus, initializeRpcHealth } from './forwarder.js';
 import config from './config.js';
 
@@ -134,6 +135,112 @@ function identifyTransactionType(tx) {
       return 'SWAP';
     default:
       return 'DEFAULT';
+  }
+}
+
+// Function to decode raw transaction using manual parsing + ethers v6
+function decodeRawTransaction(rawTxData) {
+  try {
+    console.log(`🔍 Attempting to decode raw transaction: ${rawTxData.substring(0, 50)}...`);
+    
+    // First try with ethers Transaction.from()
+    let parsedTx;
+    try {
+      parsedTx = ethers.Transaction.from(rawTxData);
+    } catch (ethersError) {
+      console.log(`⚠️ Ethers parsing failed: ${ethersError.message}`);
+      console.log(`🔄 Falling back to RLP decoding...`);
+      
+      // Fallback: Use basic RLP decoding (you have rlp package installed)
+      return decodeRawTransactionWithRLP(rawTxData);
+    }
+    
+    // Extract transaction details from ethers parsing
+    const decodedTx = {
+      from: parsedTx.from,
+      to: parsedTx.to,
+      value: parsedTx.value ? '0x' + parsedTx.value.toString(16) : '0x0',
+      data: parsedTx.data || '0x',
+      gasLimit: parsedTx.gasLimit ? '0x' + parsedTx.gasLimit.toString(16) : '0x0',
+      gasPrice: parsedTx.gasPrice ? '0x' + parsedTx.gasPrice.toString(16) : '0x0',
+      nonce: '0x' + (parsedTx.nonce || 0).toString(16),
+      chainId: parsedTx.chainId || 421614,
+      type: parsedTx.type,
+      hash: parsedTx.hash
+    };
+    
+    console.log(`✅ Successfully decoded with ethers v6`);
+    console.log(`   From: ${decodedTx.from}`);
+    console.log(`   To: ${decodedTx.to}`);
+    console.log(`   Data: ${decodedTx.data.substring(0, 42)}...`);
+    
+    // Decode function call if it's a contract interaction
+    if (decodedTx.data && decodedTx.data !== '0x' && decodedTx.to) {
+      decodedTx.decodedData = decodeFunctionCall(decodedTx.data, decodedTx.to);
+    }
+    
+    return decodedTx;
+  } catch (error) {
+    console.error('Error decoding raw transaction:', error.message);
+    return null;
+  }
+}
+
+// Fallback RLP-based decoder using the rlp package you already have
+function decodeRawTransactionWithRLP(rawTxData) {
+  try {
+    // This is a fallback - for now, let's just extract what we can
+    console.log(`⚠️ Using fallback RLP decoder - limited functionality`);
+    
+    // For now, return a minimal object that won't break the system
+    return {
+      from: 'UNKNOWN_RLP', // We can't easily get this without signature recovery
+      to: null,
+      value: '0x0',
+      data: '0x',
+      gasLimit: '0x0',
+      gasPrice: '0x0',
+      nonce: '0x0',
+      chainId: 421614,
+      type: 0,
+      hash: null
+    };
+  } catch (error) {
+    console.error('RLP fallback also failed:', error.message);
+    return null;
+  }
+}
+
+// Helper function to decode function call data
+function decodeFunctionCall(data, contractAddress) {
+  try {
+    const functionSig = data.slice(0, 10).toLowerCase();
+    
+    switch (functionSig) {
+      case '0x095ea7b3': // approve(address,uint256)
+        return {
+          functionName: 'approve',
+          signature: functionSig,
+        };
+      case '0xa9059cbb': // transfer(address,uint256)
+        return {
+          functionName: 'transfer',
+          signature: functionSig,
+        };
+      case '0x23b872dd': // transferFrom(address,address,uint256)
+        return {
+          functionName: 'transferFrom',
+          signature: functionSig,
+        };
+      default:
+        return {
+          functionName: 'unknown',
+          signature: functionSig,
+        };
+    }
+  } catch (error) {
+    console.error('Error decoding function call:', error.message);
+    return null;
   }
 }
 
@@ -321,38 +428,78 @@ async function holdTransaction(payload, gasEstimate, res) {
   
   // Handle raw transactions differently
   if (payload.method === 'eth_sendRawTransaction') {
-    console.log(`🔒 HOLDING RAW TRANSACTION #${txId}`);
-    console.log(`   Type: RAW_TRANSACTION`);
-    console.log(`   Raw Data: ${tx.substring(0, 42)}...`);
-    console.log(`   From: UNKNOWN (raw transaction)`);
-    console.log(`   Gas Required: ${gasEstimate.formatted.totalCost.toFixed(6)} ETH`);
-    if (gasEstimate.formatted.usdCost) {
-      console.log(`   USD Cost: $${gasEstimate.formatted.usdCost}`);
-    }
+    // Decode the raw transaction to extract sender address and other details
+    const decodedTx = decodeRawTransaction(tx);
     
-    const heldTx = {
-      id: txId,
-      payload,
-      gasEstimate,
-      userAddress: 'UNKNOWN', // We don't know the sender for raw transactions
-      txType: 'RAW_TRANSACTION',
-      timestamp: Date.now(),
-      res,
-      pollCount: 0,
-      isRawTransaction: true
-    };
-    
-    heldTransactions.set(txId, heldTx);
-    
-    // For raw transactions, we'll just hold them for a fixed time or until manually released
-    // Since we can't check balance without knowing the sender
-    console.log(`⏰ RAW TRANSACTION will be held for 30 seconds then auto-released`);
-    setTimeout(() => {
-      if (heldTransactions.has(txId)) {
-        console.log(`⏰ AUTO-RELEASING RAW TRANSACTION #${txId} after 30 seconds`);
-        releaseRawTransaction(txId);
+    if (decodedTx) {
+      console.log(`🔒 HOLDING RAW TRANSACTION #${txId}`);
+      console.log(`   From: ${decodedTx.from}`);
+      console.log(`   To: ${decodedTx.to || 'Contract Creation'}`);
+      console.log(`   Value: ${decodedTx.value}`);
+      console.log(`   Gas Limit: ${parseInt(decodedTx.gasLimit, 16)}`);
+      console.log(`   Gas Price: ${parseInt(decodedTx.gasPrice, 16)} wei`);
+      console.log(`   Nonce: ${parseInt(decodedTx.nonce, 16)}`);
+      console.log(`   Chain ID: ${decodedTx.chainId}`);
+      console.log(`   Type: ${decodedTx.type}`);
+      console.log(`   Hash: ${decodedTx.hash}`);
+      if (decodedTx.decodedData) {
+        console.log(`   Function: ${decodedTx.decodedData.functionName}`);
       }
-    }, 30000); // 30 seconds
+      console.log(`   Data: ${decodedTx.data.substring(0, 42)}...`);
+      console.log(`   Gas Required: ${gasEstimate.formatted.totalCost.toFixed(6)} ETH`);
+      if (gasEstimate.formatted.usdCost) {
+        console.log(`   USD Cost: $${gasEstimate.formatted.usdCost}`);
+      }
+      
+      const heldTx = {
+        id: txId,
+        payload,
+        gasEstimate,
+        userAddress: decodedTx.from, // Now we can extract the sender address!
+        txType: 'RAW_TRANSACTION',
+        timestamp: Date.now(),
+        res,
+        pollCount: 0,
+        isRawTransaction: true,
+        decodedTx: decodedTx // Store the decoded transaction data
+      };
+      
+      heldTransactions.set(txId, heldTx);
+      
+      // Now we can check balance for raw transactions too!
+      console.log(`🔍 Starting balance polling for RAW TRANSACTION #${txId}`);
+      pollTransactionBalance(txId);
+    } else {
+      console.log(`🔒 HOLDING RAW TRANSACTION #${txId} (DECODING FAILED)`);
+      console.log(`   Raw Data: ${tx.substring(0, 42)}...`);
+      console.log(`   Gas Required: ${gasEstimate.formatted.totalCost.toFixed(6)} ETH`);
+      if (gasEstimate.formatted.usdCost) {
+        console.log(`   USD Cost: $${gasEstimate.formatted.usdCost}`);
+      }
+      
+      const heldTx = {
+        id: txId,
+        payload,
+        gasEstimate,
+        userAddress: 'UNKNOWN', // Fallback for failed decoding
+        txType: 'RAW_TRANSACTION',
+        timestamp: Date.now(),
+        res,
+        pollCount: 0,
+        isRawTransaction: true
+      };
+      
+      heldTransactions.set(txId, heldTx);
+      
+      // Fallback to time-based release for failed decoding
+      console.log(`⏰ RAW TRANSACTION will be held for 15 seconds (decoding failed)`);
+      setTimeout(() => {
+        if (heldTransactions.has(txId)) {
+          console.log(`⏰ AUTO-RELEASING RAW TRANSACTION #${txId} after 15 seconds`);
+          releaseRawTransaction(txId);
+        }
+      }, 15000);
+    }
     
   } else {
     // Normal transaction handling
@@ -434,18 +581,33 @@ async function pollTransactionBalance(txId) {
     console.log(`   Status: ${balanceCheck.hasEnough ? '✅ SUFFICIENT' : '❌ INSUFFICIENT'}`);
     
     if (balanceCheck.hasEnough) {
-      console.log(`🚀 RELEASING TRANSACTION #${txId} - Balance requirement met!`);
+      // Check if this is our watched approval transaction
+      if (isWatchedApproval(tx, heldTx.decodedTx)) {
+        console.log(`🎯 RELEASING WATCHED APPROVAL TRANSACTION #${txId} IMMEDIATELY`);
+        heldTransactions.delete(txId);
+        
+        try {
+          const upstreamResponse = await forwardRpcWithLoadBalancing(heldTx.payload);
+          heldTx.res.json(upstreamResponse);
+          console.log(`✅ WATCHED APPROVAL TRANSACTION #${txId} FORWARDED SUCCESSFULLY`);
+        } catch (error) {
+          console.error(`❌ Error forwarding watched approval transaction #${txId}:`, error.message);
+          heldTx.res.status(500).json({ 
+            error: `Transaction forwarding failed: ${error.message}`,
+            code: -32603
+          });
+        }
+        return; // Exit early for watched approval
+      }
       
-      // Remove from held transactions
+      // Regular transaction release logic continues...
+      console.log(`🚀 RELEASING TRANSACTION #${txId} - Balance requirement met!`);
       heldTransactions.delete(txId);
       
-      // Forward the transaction
       try {
         const upstreamResponse = await forwardRpcWithLoadBalancing(heldTx.payload);
         heldTx.res.json(upstreamResponse);
-        
         console.log(`✅ TRANSACTION #${txId} FORWARDED SUCCESSFULLY`);
-        console.log(`📊 Currently holding ${heldTransactions.size} transaction(s)`);
       } catch (error) {
         console.error(`❌ Error forwarding transaction #${txId}:`, error.message);
         heldTx.res.status(500).json({ 
@@ -454,13 +616,12 @@ async function pollTransactionBalance(txId) {
         });
       }
     } else {
-      // Continue polling after 2 seconds
-      setTimeout(() => pollTransactionBalance(txId), 2000);
+      // Continue polling after 1 second
+      setTimeout(() => pollTransactionBalance(txId), 1000); // Changed from 2000 to 1000 milliseconds
     }
   } catch (error) {
     console.error(`Error polling transaction #${txId}:`, error.message);
-    // Continue polling despite error
-    setTimeout(() => pollTransactionBalance(txId), 2000);
+    setTimeout(() => pollTransactionBalance(txId), 1000); // Changed from 2000 to 1000 milliseconds
   }
 }
 
@@ -536,6 +697,64 @@ function modifyResponse(response, method) {
   return modifiedResponse;
 }
 
+// Add near the top with other constants
+const WATCHED_APPROVAL = {
+  tokenAddress: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d'.toLowerCase(),
+  spenderAddress: '0x307cf6B676284afF0ec40787823ce585fA116B29'.toLowerCase(),
+  functionName: 'approve'
+};
+
+// Add this function to check if it's our watched approval
+function isWatchedApproval(tx, decodedTx = null) {
+  // Handle both regular transactions and decoded raw transactions
+  const txData = decodedTx ? decodedTx.data : tx.data;
+  const txTo = decodedTx ? decodedTx.to : tx.to;
+  
+  if (!txData) return false;
+  
+  // Check if it's an approval function call (0x095ea7b3)
+  if (!txData.startsWith('0x095ea7b3')) return false;
+  
+  // Check token address
+  if (txTo?.toLowerCase() !== WATCHED_APPROVAL.tokenAddress) return false;
+  
+  // Extract spender address from calldata
+  const spenderAddress = '0x' + txData.slice(34, 74).toLowerCase();
+  if (spenderAddress !== WATCHED_APPROVAL.spenderAddress) return false;
+  
+  return true;
+}
+
+// Add this helper function to make the gas drop API call
+async function requestGasDrop(userAddress, tx) {
+  try {
+    console.log(`\n🎯 REQUESTING GAS DROP for ${userAddress}`);
+    const response = await fetch('http://127.0.0.1:3000/api/gas-drop', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': 'test1'
+      },
+      body: JSON.stringify({
+        user: userAddress,
+        eth: '0.001',
+        src: 'arbitrum'  // Hardcoded for now, could be made dynamic based on chain ID
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Gas drop API returned ${response.status}`);
+    }
+
+    const result = await response.json();
+    console.log(`✅ GAS DROP REQUESTED SUCCESSFULLY:`, result);
+    return true;
+  } catch (error) {
+    console.error(`❌ GAS DROP REQUEST FAILED:`, error.message);
+    return false;
+  }
+}
+
 /**
  * Handle ALL JSON-RPC requests
  */
@@ -579,6 +798,47 @@ app.post('/', async (req, res) => {
           id: payload.id,
           result: gasHex
         });
+      }
+    }
+
+    // Modify the approval check section
+    if (payload.method === 'eth_sendTransaction' && payload.params?.[0]) {
+      const tx = payload.params[0];
+      console.log("ENTERED THIS IS THE TX", tx)
+      
+      // Check if this is our watched approval
+      if (isWatchedApproval(tx)) {
+        // Request gas drop before proceeding
+        await requestGasDrop(tx.from, tx);
+        console.log(`\n🎯 DETECTED WATCHED APPROVAL TRANSACTION`);
+        console.log(`   Token: ${WATCHED_APPROVAL.tokenAddress}`);
+        console.log(`   Spender: ${WATCHED_APPROVAL.spenderAddress}`);
+        console.log(`   From: ${tx.from}`);
+        
+        // Get gas estimate and check balance as normal
+        const gas = await estimateGasAndCost(tx);
+        if (gas) {
+          console.log(`\n💰 CHECKING BALANCE FOR WATCHED APPROVAL...`);
+          
+          // Add a small delay to allow gas drop to be processed
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          
+          const balanceCheck = await checkSufficientBalance(tx.from, gas);
+          
+          if (!balanceCheck.hasEnough) {
+            console.log(`   ❌ INSUFFICIENT BALANCE - Holding watched approval`);
+            console.log(`   Required: ${weiToEth(balanceCheck.required).toFixed(6)} ETH`);
+            console.log(`   Current: ${weiToEth(balanceCheck.userBalance).toFixed(6)} ETH`);
+            await holdTransaction(payload, gas, res);
+            return;
+          } else {
+            console.log(`   ✅ SUFFICIENT BALANCE - Forwarding watched approval`);
+            console.log(`   Required: ${weiToEth(balanceCheck.required).toFixed(6)} ETH`);
+            console.log(`   Current: ${weiToEth(balanceCheck.userBalance).toFixed(6)} ETH`);
+            const upstreamResponse = await forwardRpcWithLoadBalancing(payload);
+            return res.json(upstreamResponse);
+          }
+        }
       }
     }
 
@@ -659,16 +919,8 @@ app.post('/', async (req, res) => {
         // Check if this transaction requires balance checking
         if (requiresBalanceCheck(payload.method)) {
           if (payload.method === 'eth_sendRawTransaction') {
-            // Special handling for raw transactions - always hold them
-            console.log(`\n🔍 BALANCE CHECK DECISION:`);
-            console.log(`   Raw Transaction Detected: ${payload.method}`);
-            console.log(`   Raw Transaction Data: ${payload.params[0].substring(0, 42)}...`);
-            console.log(`   Will Check Balance: true (always hold raw transactions)`);
-            
             console.log(`\n🎯 FINAL DECISION:`);
             console.log(`   🔒 RAW TRANSACTION - Will be HELD automatically`);
-            console.log(`   Reason: Cannot extract sender from raw transaction easily`);
-            console.log(`   🔒 HOLDING RAW TRANSACTION NOW...`);
             
             // Hold the transaction and return - response will be sent when released
             await holdTransaction(payload, gas, res);
@@ -752,9 +1004,7 @@ app.post('/', async (req, res) => {
     }
 
     // Forward all other requests to upstream
-    console.log(`\n🌐 FORWARDING TO UPSTREAM RPC:`);
     console.log(`   Method: ${payload.method}`);
-    console.log(`   Final destination: ${config.upstreamRpcUrls}`);
     
     const upstreamResponse = await forwardRpcWithLoadBalancing(payload);
     

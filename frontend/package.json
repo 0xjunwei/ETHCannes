@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@wagmi/connectors": "^5.8.5",
+    "axios": "^1.10.0",
     "framer-motion": "^12.23.0",
     "lucide-react": "^0.510.0",
     "react": "19.0.0",
