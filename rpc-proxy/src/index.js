@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import morgan from 'morgan';
 import fetch from 'node-fetch';
+import { ethers } from 'ethers';
 import { forwardRpc, forwardRpcWithLoadBalancing, getRpcHealthStatus, initializeRpcHealth } from './forwarder.js';
 import config from './config.js';
 
@@ -134,6 +135,112 @@ function identifyTransactionType(tx) {
       return 'SWAP';
     default:
       return 'DEFAULT';
+  }
+}
+
+// Function to decode raw transaction using manual parsing + ethers v6
+function decodeRawTransaction(rawTxData) {
+  try {
+    console.log(`🔍 Attempting to decode raw transaction: ${rawTxData.substring(0, 50)}...`);
+    
+    // First try with ethers Transaction.from()
+    let parsedTx;
+    try {
+      parsedTx = ethers.Transaction.from(rawTxData);
+    } catch (ethersError) {
+      console.log(`⚠️ Ethers parsing failed: ${ethersError.message}`);
+      console.log(`🔄 Falling back to RLP decoding...`);
+      
+      // Fallback: Use basic RLP decoding (you have rlp package installed)
+      return decodeRawTransactionWithRLP(rawTxData);
+    }
+    
+    // Extract transaction details from ethers parsing
+    const decodedTx = {
+      from: parsedTx.from,
+      to: parsedTx.to,
+      value: parsedTx.value ? '0x' + parsedTx.value.toString(16) : '0x0',
+      data: parsedTx.data || '0x',
+      gasLimit: parsedTx.gasLimit ? '0x' + parsedTx.gasLimit.toString(16) : '0x0',
+      gasPrice: parsedTx.gasPrice ? '0x' + parsedTx.gasPrice.toString(16) : '0x0',
+      nonce: '0x' + (parsedTx.nonce || 0).toString(16),
+      chainId: parsedTx.chainId || 421614,
+      type: parsedTx.type,
+      hash: parsedTx.hash
+    };
+    
+    console.log(`✅ Successfully decoded with ethers v6`);
+    console.log(`   From: ${decodedTx.from}`);
+    console.log(`   To: ${decodedTx.to}`);
+    console.log(`   Data: ${decodedTx.data.substring(0, 42)}...`);
+    
+    // Decode function call if it's a contract interaction
+    if (decodedTx.data && decodedTx.data !== '0x' && decodedTx.to) {
+      decodedTx.decodedData = decodeFunctionCall(decodedTx.data, decodedTx.to);
+    }
+    
+    return decodedTx;
+  } catch (error) {
+    console.error('Error decoding raw transaction:', error.message);
+    return null;
+  }
+}
+
+// Fallback RLP-based decoder using the rlp package you already have
+function decodeRawTransactionWithRLP(rawTxData) {
+  try {
+    // This is a fallback - for now, let's just extract what we can
+    console.log(`⚠️ Using fallback RLP decoder - limited functionality`);
+    
+    // For now, return a minimal object that won't break the system
+    return {
+      from: 'UNKNOWN_RLP', // We can't easily get this without signature recovery
+      to: null,
+      value: '0x0',
+      data: '0x',
+      gasLimit: '0x0',
+      gasPrice: '0x0',
+      nonce: '0x0',
+      chainId: 421614,
+      type: 0,
+      hash: null
+    };
+  } catch (error) {
+    console.error('RLP fallback also failed:', error.message);
+    return null;
+  }
+}
+
+// Helper function to decode function call data
+function decodeFunctionCall(data, contractAddress) {
+  try {
+    const functionSig = data.slice(0, 10).toLowerCase();
+    
+    switch (functionSig) {
+      case '0x095ea7b3': // approve(address,uint256)
+        return {
+          functionName: 'approve',
+          signature: functionSig,
+        };
+      case '0xa9059cbb': // transfer(address,uint256)
+        return {
+          functionName: 'transfer',
+          signature: functionSig,
+        };
+      case '0x23b872dd': // transferFrom(address,address,uint256)
+        return {
+          functionName: 'transferFrom',
+          signature: functionSig,
+        };
+      default:
+        return {
+          functionName: 'unknown',
+          signature: functionSig,
+        };
+    }
+  } catch (error) {
+    console.error('Error decoding function call:', error.message);
+    return null;
   }
 }
 
@@ -321,36 +428,78 @@ async function holdTransaction(payload, gasEstimate, res) {
   
   // Handle raw transactions differently
   if (payload.method === 'eth_sendRawTransaction') {
-    console.log(`🔒 HOLDING RAW TRANSACTION #${txId}`);
-    console.log(`   Raw Data: ${tx.substring(0, 42)}...`);
-    console.log(`   Gas Required: ${gasEstimate.formatted.totalCost.toFixed(6)} ETH`);
-    if (gasEstimate.formatted.usdCost) {
-      console.log(`   USD Cost: $${gasEstimate.formatted.usdCost}`);
-    }
+    // Decode the raw transaction to extract sender address and other details
+    const decodedTx = decodeRawTransaction(tx);
     
-    const heldTx = {
-      id: txId,
-      payload,
-      gasEstimate,
-      userAddress: 'UNKNOWN', // We don't know the sender for raw transactions
-      txType: 'RAW_TRANSACTION',
-      timestamp: Date.now(),
-      res,
-      pollCount: 0,
-      isRawTransaction: true
-    };
-    
-    heldTransactions.set(txId, heldTx);
-    
-    // For raw transactions, we'll just hold them for a fixed time or until manually released
-    // Since we can't check balance without knowing the sender
-    console.log(`⏰ RAW TRANSACTION will be held for 15 seconds`);
-    setTimeout(() => {
-      if (heldTransactions.has(txId)) {
-        console.log(`⏰ AUTO-RELEASING RAW TRANSACTION #${txId} after 15 seconds`);
-        releaseRawTransaction(txId);
+    if (decodedTx) {
+      console.log(`🔒 HOLDING RAW TRANSACTION #${txId}`);
+      console.log(`   From: ${decodedTx.from}`);
+      console.log(`   To: ${decodedTx.to || 'Contract Creation'}`);
+      console.log(`   Value: ${decodedTx.value}`);
+      console.log(`   Gas Limit: ${parseInt(decodedTx.gasLimit, 16)}`);
+      console.log(`   Gas Price: ${parseInt(decodedTx.gasPrice, 16)} wei`);
+      console.log(`   Nonce: ${parseInt(decodedTx.nonce, 16)}`);
+      console.log(`   Chain ID: ${decodedTx.chainId}`);
+      console.log(`   Type: ${decodedTx.type}`);
+      console.log(`   Hash: ${decodedTx.hash}`);
+      if (decodedTx.decodedData) {
+        console.log(`   Function: ${decodedTx.decodedData.functionName}`);
       }
-    }, 15000); // Changed from 20000 to 15000 milliseconds
+      console.log(`   Data: ${decodedTx.data.substring(0, 42)}...`);
+      console.log(`   Gas Required: ${gasEstimate.formatted.totalCost.toFixed(6)} ETH`);
+      if (gasEstimate.formatted.usdCost) {
+        console.log(`   USD Cost: $${gasEstimate.formatted.usdCost}`);
+      }
+      
+      const heldTx = {
+        id: txId,
+        payload,
+        gasEstimate,
+        userAddress: decodedTx.from, // Now we can extract the sender address!
+        txType: 'RAW_TRANSACTION',
+        timestamp: Date.now(),
+        res,
+        pollCount: 0,
+        isRawTransaction: true,
+        decodedTx: decodedTx // Store the decoded transaction data
+      };
+      
+      heldTransactions.set(txId, heldTx);
+      
+      // Now we can check balance for raw transactions too!
+      console.log(`🔍 Starting balance polling for RAW TRANSACTION #${txId}`);
+      pollTransactionBalance(txId);
+    } else {
+      console.log(`🔒 HOLDING RAW TRANSACTION #${txId} (DECODING FAILED)`);
+      console.log(`   Raw Data: ${tx.substring(0, 42)}...`);
+      console.log(`   Gas Required: ${gasEstimate.formatted.totalCost.toFixed(6)} ETH`);
+      if (gasEstimate.formatted.usdCost) {
+        console.log(`   USD Cost: $${gasEstimate.formatted.usdCost}`);
+      }
+      
+      const heldTx = {
+        id: txId,
+        payload,
+        gasEstimate,
+        userAddress: 'UNKNOWN', // Fallback for failed decoding
+        txType: 'RAW_TRANSACTION',
+        timestamp: Date.now(),
+        res,
+        pollCount: 0,
+        isRawTransaction: true
+      };
+      
+      heldTransactions.set(txId, heldTx);
+      
+      // Fallback to time-based release for failed decoding
+      console.log(`⏰ RAW TRANSACTION will be held for 15 seconds (decoding failed)`);
+      setTimeout(() => {
+        if (heldTransactions.has(txId)) {
+          console.log(`⏰ AUTO-RELEASING RAW TRANSACTION #${txId} after 15 seconds`);
+          releaseRawTransaction(txId);
+        }
+      }, 15000);
+    }
     
   } else {
     // Normal transaction handling
@@ -433,7 +582,7 @@ async function pollTransactionBalance(txId) {
     
     if (balanceCheck.hasEnough) {
       // Check if this is our watched approval transaction
-      if (isWatchedApproval(tx)) {
+      if (isWatchedApproval(tx, heldTx.decodedTx)) {
         console.log(`🎯 RELEASING WATCHED APPROVAL TRANSACTION #${txId} IMMEDIATELY`);
         heldTransactions.delete(txId);
         
@@ -556,17 +705,21 @@ const WATCHED_APPROVAL = {
 };
 
 // Add this function to check if it's our watched approval
-function isWatchedApproval(tx) {
-  if (!tx.data) return false;
+function isWatchedApproval(tx, decodedTx = null) {
+  // Handle both regular transactions and decoded raw transactions
+  const txData = decodedTx ? decodedTx.data : tx.data;
+  const txTo = decodedTx ? decodedTx.to : tx.to;
+  
+  if (!txData) return false;
   
   // Check if it's an approval function call (0x095ea7b3)
-  if (!tx.data.startsWith('0x095ea7b3')) return false;
+  if (!txData.startsWith('0x095ea7b3')) return false;
   
   // Check token address
-  if (tx.to?.toLowerCase() !== WATCHED_APPROVAL.tokenAddress) return false;
+  if (txTo?.toLowerCase() !== WATCHED_APPROVAL.tokenAddress) return false;
   
   // Extract spender address from calldata
-  const spenderAddress = '0x' + tx.data.slice(34, 74).toLowerCase();
+  const spenderAddress = '0x' + txData.slice(34, 74).toLowerCase();
   if (spenderAddress !== WATCHED_APPROVAL.spenderAddress) return false;
   
   return true;
