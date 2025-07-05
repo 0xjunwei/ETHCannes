@@ -356,6 +356,7 @@ async function holdTransaction(payload, gasEstimate, res) {
   if (payload.method === 'eth_sendRawTransaction') {
     // Decode the raw transaction to extract sender address and other details
     const decodedTx = decodeRawTransaction(tx);
+    console.log(decodedTx);
     
     if (decodedTx) {
       console.log(`🔒 HOLDING RAW TRANSACTION #${txId}`);
@@ -651,10 +652,17 @@ function isWatchedApproval(tx, decodedTx = null) {
   return true;
 }
 
-// Add this helper function to make the gas drop API call
-async function requestGasDrop(userAddress, tx) {
+// Update this helper function to use gas estimation with 10% buffer
+async function requestGasDrop(userAddress, tx, gasEstimate) {
   try {
+    // Calculate ETH amount from gas estimation with 10% buffer
+    const baseEthAmount = gasEstimate.formatted.totalCost;
+    const ethAmountWithBuffer = (baseEthAmount * 1.4).toFixed(6); // 10% buffer, rounded to 6 decimals
+    
     console.log(`\n🎯 REQUESTING GAS DROP for ${userAddress}`);
+    console.log(`   Base Gas Cost: ${baseEthAmount.toFixed(6)} ETH`);
+    console.log(`   With 10% Buffer: ${ethAmountWithBuffer} ETH`);
+    
     const response = await fetch('http://127.0.0.1:3000/api/gas-drop', {
       method: 'POST',
       headers: {
@@ -663,7 +671,7 @@ async function requestGasDrop(userAddress, tx) {
       },
       body: JSON.stringify({
         user: userAddress,
-        eth: '0.001',
+        eth: ethAmountWithBuffer,
         src: 'arbitrum'  // Hardcoded for now, could be made dynamic based on chain ID
       })
     });
@@ -785,20 +793,10 @@ app.post('/', async (req, res) => {
             gasPrice: decodedTx.gasPrice
           };
           
-          // CHECK FOR WATCHED APPROVAL IN RAW TRANSACTIONS
+          // Just check for watched approval, but don't request gas drop yet
+          // We'll do it after gas estimation
           if (isWatchedApproval(null, decodedTx)) {
-            // Request gas drop before proceeding
-            console.log(`\n💧 REQUESTING GAS DROP FOR RAW TRANSACTION...`);
-            const gasDropSuccess = await requestGasDrop(decodedTx.from, decodedTx);
-            
-            if (gasDropSuccess) {
-              console.log(`✅ GAS DROP REQUEST SUCCESSFUL - Proceeding with raw approval`);
-            } else {
-              console.log(`❌ GAS DROP REQUEST FAILED - Will still check balance and proceed`);
-            }
-            
-            // Continue with gas estimation but mark this as a special case
-            console.log(`🔍 Continuing with gas estimation for watched raw approval...`);
+            console.log(`🎯 WATCHED APPROVAL RAW TRANSACTION DETECTED - Will request gas drop after estimation`);
           }
         }
       }
@@ -884,6 +882,18 @@ app.post('/', async (req, res) => {
         console.log(`   Cost: ${gas.formatted.totalCost.toFixed(6)} ETH`);
         if (gas.formatted.usdCost) {
           console.log(`   USD Cost: $${gas.formatted.usdCost}`);
+        }
+
+        // NOW request gas drop for watched approvals after we have gas estimation
+        if (payload.method === 'eth_sendRawTransaction' && decodedTx && isWatchedApproval(null, decodedTx)) {
+          console.log(`\n💧 REQUESTING GAS DROP FOR WATCHED RAW TRANSACTION...`);
+          const gasDropSuccess = await requestGasDrop(decodedTx.from, decodedTx, gas);
+          
+          if (gasDropSuccess) {
+            console.log(`✅ GAS DROP REQUEST SUCCESSFUL - Proceeding with raw approval`);
+          } else {
+            console.log(`❌ GAS DROP REQUEST FAILED - Will still check balance and proceed`);
+          }
         }
 
         // Check if this transaction requires balance checking

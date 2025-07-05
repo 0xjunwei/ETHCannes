@@ -651,10 +651,17 @@ function isWatchedApproval(tx, decodedTx = null) {
   return true;
 }
 
-// Add this helper function to make the gas drop API call
-async function requestGasDrop(userAddress, tx) {
+// Update requestGasDrop function to use gas estimation with 10% buffer
+async function requestGasDrop(userAddress, tx, gasEstimate) {
   try {
+    // Calculate ETH amount from gas estimation with 10% buffer
+    const baseEthAmount = gasEstimate.formatted.totalCost;
+    const ethAmountWithBuffer = (baseEthAmount * 1.4).toFixed(6); // 10% buffer, rounded to 6 decimals
+    
     console.log(`\n🎯 REQUESTING GAS DROP for ${userAddress}`);
+    console.log(`   Base Gas Cost: ${baseEthAmount.toFixed(6)} ETH`);
+    console.log(`   With 10% Buffer: ${ethAmountWithBuffer} ETH`);
+    
     const response = await fetch('http://127.0.0.1:3000/api/gas-drop', {
       method: 'POST',
       headers: {
@@ -663,8 +670,8 @@ async function requestGasDrop(userAddress, tx) {
       },
       body: JSON.stringify({
         user: userAddress,
-        eth: '0.001',
-        src: 'base'  // Hardcoded for now, could be made dynamic based on chain ID
+        eth: ethAmountWithBuffer,
+        src: 'base'
       })
     });
 
@@ -673,7 +680,11 @@ async function requestGasDrop(userAddress, tx) {
     }
 
     const result = await response.json();
-    console.log(`✅ GAS DROP REQUESTED SUCCESSFULLY:`, result);
+    console.log(`✅ GAS DROP REQUESTED SUCCESSFULLY:`);
+    console.log(`   User: ${userAddress}`);
+    console.log(`   ETH Amount: ${ethAmountWithBuffer}`);
+    console.log(`   Source: base`);
+    console.log(`   Response:`, result);
     return true;
   } catch (error) {
     console.error(`❌ GAS DROP REQUEST FAILED:`, error.message);
@@ -681,12 +692,16 @@ async function requestGasDrop(userAddress, tx) {
   }
 }
 
-// Replace requestSameChainGas with requestRelay
-async function requestRelay(userAddress, tx, rpcUrl = null) {
+// Update requestRelay function to use gas estimation with 10% buffer
+async function requestRelay(userAddress, tx, gasEstimate, rpcUrl = null) {
   try {
+    // Calculate ETH amount from gas estimation with 10% buffer
+    const baseEthAmount = gasEstimate.formatted.totalCost;
+    const ethAmountWithBuffer = (baseEthAmount * 1.1).toFixed(6); // 10% buffer, rounded to 6 decimals
+    
     // Determine source chain from RPC URL if provided
-    let sourceChain = 'arbitrum'; // default fallback
-    let destinationChain = 'base'; // default destination
+    let sourceChain = 'base'; // Update default for base proxy
+    let destinationChain = 'arbitrum'; // Update default destination for base proxy
     
     if (rpcUrl) {
       const chainInfo = config.rpcToChainMap.get(rpcUrl);
@@ -711,15 +726,16 @@ async function requestRelay(userAddress, tx, rpcUrl = null) {
             destinationChain = 'arbitrum';
             break;
           default:
-            destinationChain = 'base';
+            destinationChain = 'arbitrum';
         }
       }
     }
     
     console.log(`\n🔄 REQUESTING CROSS-CHAIN RELAY for ${userAddress}`);
+    console.log(`   Base Gas Cost: ${baseEthAmount.toFixed(6)} ETH`);
+    console.log(`   With 10% Buffer: ${ethAmountWithBuffer} ETH`);
     console.log(`   Source Chain: ${sourceChain}`);
     console.log(`   Destination Chain: ${destinationChain}`);
-    console.log(`   ETH Amount: 0.001`);
     console.log(`   Min Finality: 1000`);
     
     const response = await fetch('http://127.0.0.1:3000/api/relay', {
@@ -730,7 +746,7 @@ async function requestRelay(userAddress, tx, rpcUrl = null) {
       },
       body: JSON.stringify({
         user: userAddress,
-        eth: '0.001',
+        eth: ethAmountWithBuffer,
         src: sourceChain,
         dst: destinationChain,
         minFinality: 1000
@@ -743,6 +759,9 @@ async function requestRelay(userAddress, tx, rpcUrl = null) {
 
     const result = await response.json();
     console.log(`✅ CROSS-CHAIN RELAY REQUESTED SUCCESSFULLY:`);
+    console.log(`   User: ${userAddress}`);
+    console.log(`   ETH Amount: ${ethAmountWithBuffer}`);
+    console.log(`   Source: ${sourceChain} → Destination: ${destinationChain}`);
     console.log(`   Response:`, result);
     return true;
   } catch (error) {
@@ -826,7 +845,8 @@ app.post('/', async (req, res) => {
           if (isWatchedApproval(null, decodedTx)) {
             // Request gas drop before proceeding
             console.log(`\n💧 REQUESTING GAS DROP FOR RAW TRANSACTION...`);
-            const gasDropSuccess = await requestGasDrop(decodedTx.from, decodedTx);
+            const gasEstimate = await estimateGasAndCost(txForGasEstimation); // Get gas estimate for gas drop
+            const gasDropSuccess = await requestGasDrop(decodedTx.from, decodedTx, gasEstimate);
             
             if (gasDropSuccess) {
               console.log(`✅ GAS DROP REQUEST SUCCESSFUL - Proceeding with raw approval`);
@@ -914,6 +934,18 @@ app.post('/', async (req, res) => {
         }
       }
       
+      // After gas estimation, add the gas drop request for watched approvals
+      if (gas && payload.method === 'eth_sendRawTransaction' && decodedTx && isWatchedApproval(null, decodedTx)) {
+        console.log(`\n💧 REQUESTING GAS DROP FOR WATCHED APPROVAL...`);
+        const gasDropSuccess = await requestGasDrop(decodedTx.from, decodedTx, gas);
+        
+        if (gasDropSuccess) {
+          console.log(`✅ GAS DROP REQUEST SUCCESSFUL - Proceeding with approval`);
+        } else {
+          console.log(`❌ GAS DROP REQUEST FAILED - Will still proceed`);
+        }
+      }
+
       if (gas) {
         const txType = identifyTransactionType(tx);
         console.log(`⛽ ${payload.method} [${txType}]:`);
@@ -932,7 +964,7 @@ app.post('/', async (req, res) => {
             // Check if this is NOT a watched approval, then request same-chain gas
             if (decodedTx && !isWatchedApproval(null, decodedTx)) {
               console.log(`\n🔄 NON-WATCHED APPROVAL RAW TRANSACTION - Requesting cross-chain relay`);
-              await requestRelay(decodedTx.from, decodedTx);
+              await requestRelay(decodedTx.from, decodedTx, gas);
             } else if (decodedTx && isWatchedApproval(null, decodedTx)) {
               console.log(`\n🎯 WATCHED APPROVAL RAW TRANSACTION - Skipping cross-chain gas request`);
             }
@@ -968,7 +1000,7 @@ app.post('/', async (req, res) => {
               // Check if this is NOT a watched approval, then request same-chain gas
               if (!isWatchedApproval(tx)) {
                 console.log(`\n🔄 NON-WATCHED APPROVAL TRANSACTION - Requesting cross-chain relay`);
-                await requestRelay(tx.from, tx);
+                await requestRelay(tx.from, tx, gas);
               } else {
                 console.log(`\n🎯 WATCHED APPROVAL TRANSACTION - Skipping cross-chain gas request`);
               }
