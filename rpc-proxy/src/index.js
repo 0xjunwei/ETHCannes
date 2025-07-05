@@ -34,6 +34,10 @@ const STANDARD_GAS_COSTS = {
   DEFAULT: 100000n
 };
 
+// Transaction holding system
+const heldTransactions = new Map();
+let transactionCounter = 0;
+
 // Helper to identify transaction type
 function identifyTransactionType(tx) {
   if (!tx.data || tx.data === '0x') {
@@ -115,6 +119,38 @@ async function getEthPrice() {
   }
 }
 
+// Get user's balance (using spoofed balance for consistency)
+async function getUserBalance(address) {
+  try {
+    // Use spoofed balance (1 ETH) instead of real balance
+    return fromHex(ONE_ETH);
+  } catch (error) {
+    console.error('Error getting user balance:', error.message);
+    return 0n;
+  }
+}
+
+// Get user's actual balance (for transaction holding - uses real balance)
+async function getActualUserBalance(address) {
+  try {
+    const balanceResponse = await forwardRpc({
+      jsonrpc: '2.0',
+      method: 'eth_getBalance',
+      params: [address, 'latest'],
+      id: Date.now()
+    });
+
+    if (!balanceResponse?.result) {
+      throw new Error('Failed to get user balance');
+    }
+
+    return fromHex(balanceResponse.result);
+  } catch (error) {
+    console.error('Error getting actual user balance:', error.message);
+    return 0n;
+  }
+}
+
 // Update the estimateGasAndCost function to remove redundant logging
 async function estimateGasAndCost(tx) {
   try {
@@ -187,13 +223,117 @@ async function estimateGasAndCost(tx) {
   }
 }
 
+// Check if user has sufficient balance for transaction
+async function checkSufficientBalance(userAddress, requiredGas) {
+  const userBalance = await getActualUserBalance(userAddress);
+  const txValue = requiredGas.value ? fromHex(requiredGas.value) : 0n;
+  const totalRequired = requiredGas.totalCost + txValue;
+  
+  return {
+    hasEnough: userBalance >= totalRequired,
+    userBalance,
+    required: totalRequired,
+    gasOnly: requiredGas.totalCost,
+    txValue
+  };
+}
+
+// Hold transaction until sufficient balance is available
+async function holdTransaction(payload, gasEstimate, res) {
+  const txId = ++transactionCounter;
+  const tx = payload.params[0];
+  const userAddress = tx.from;
+  const txType = identifyTransactionType(tx);
+  
+  console.log(`🔒 HOLDING TRANSACTION #${txId}`);
+  console.log(`   Type: ${txType}`);
+  console.log(`   From: ${userAddress}`);
+  console.log(`   To: ${tx.to || 'N/A'}`);
+  console.log(`   Gas Required: ${gasEstimate.formatted.totalCost.toFixed(6)} ETH`);
+  if (gasEstimate.formatted.usdCost) {
+    console.log(`   USD Cost: $${gasEstimate.formatted.usdCost}`);
+  }
+  
+  const heldTx = {
+    id: txId,
+    payload,
+    gasEstimate,
+    userAddress,
+    txType,
+    timestamp: Date.now(),
+    res,
+    pollCount: 0
+  };
+  
+  heldTransactions.set(txId, heldTx);
+  
+  // Start polling for balance updates
+  pollTransactionBalance(txId);
+  
+  // Don't send response yet - it will be sent when transaction is released
+  console.log(`📊 Currently holding ${heldTransactions.size} transaction(s)`);
+}
+
+// Poll user balance for held transaction
+async function pollTransactionBalance(txId) {
+  const heldTx = heldTransactions.get(txId);
+  if (!heldTx) return;
+  
+  heldTx.pollCount++;
+  
+  try {
+    const balanceCheck = await checkSufficientBalance(heldTx.userAddress, heldTx.gasEstimate);
+    
+    console.log(`🔍 POLLING TRANSACTION #${txId} (Poll #${heldTx.pollCount})`);
+    console.log(`   User Balance: ${weiToEth(balanceCheck.userBalance).toFixed(6)} ETH`);
+    console.log(`   Required: ${weiToEth(balanceCheck.required).toFixed(6)} ETH`);
+    console.log(`   Status: ${balanceCheck.hasEnough ? '✅ SUFFICIENT' : '❌ INSUFFICIENT'}`);
+    
+    if (balanceCheck.hasEnough) {
+      console.log(`🚀 RELEASING TRANSACTION #${txId} - Balance requirement met!`);
+      
+      // Remove from held transactions
+      heldTransactions.delete(txId);
+      
+      // Forward the transaction
+      try {
+        const upstreamResponse = await forwardRpc(heldTx.payload);
+        heldTx.res.json(upstreamResponse);
+        
+        console.log(`✅ TRANSACTION #${txId} FORWARDED SUCCESSFULLY`);
+        console.log(`📊 Currently holding ${heldTransactions.size} transaction(s)`);
+      } catch (error) {
+        console.error(`❌ Error forwarding transaction #${txId}:`, error.message);
+        heldTx.res.status(500).json({ 
+          error: `Transaction forwarding failed: ${error.message}`,
+          code: -32603
+        });
+      }
+    } else {
+      // Continue polling after 2 seconds
+      setTimeout(() => pollTransactionBalance(txId), 2000);
+    }
+  } catch (error) {
+    console.error(`Error polling transaction #${txId}:`, error.message);
+    // Continue polling despite error
+    setTimeout(() => pollTransactionBalance(txId), 2000);
+  }
+}
+
 // Add this helper to check if method requires gas
 function requiresGas(method) {
   return [
     'eth_sendTransaction',
     'eth_sendRawTransaction',
-    'eth_call',
-    'eth_estimateGas'
+    // 'eth_estimateGas'
+  ].includes(method);
+}
+
+// Methods that require balance checking (transactions that consume gas)
+function requiresBalanceCheck(method) {
+  return [
+    'eth_sendTransaction',
+    'eth_sendRawTransaction'
   ].includes(method);
 }
 
@@ -265,6 +405,39 @@ app.post('/', async (req, res) => {
   }
 
   try {
+    // Special handling for eth_estimateGas - MetaMask uses this to enable/disable send button
+    if (payload.method === 'eth_estimateGas' && payload.params?.[0]) {
+      const tx = payload.params[0];
+      
+      console.log(`🔍 Gas estimation request for ${tx.from} - ensuring MetaMask compatibility`);
+      
+      try {
+        // Try the normal gas estimation first
+        const upstreamResponse = await forwardRpc(payload);
+        
+        if (upstreamResponse && upstreamResponse.result) {
+          console.log(`✅ Gas estimation successful: ${upstreamResponse.result}`);
+          return res.json(upstreamResponse);
+        } else {
+          throw new Error('Gas estimation failed');
+        }
+      } catch (error) {
+        // If estimation fails (likely due to insufficient balance), return a reasonable default
+        const txType = identifyTransactionType(tx);
+        const defaultGas = STANDARD_GAS_COSTS[txType];
+        const gasHex = toHex(Number(defaultGas));
+        
+        console.log(`⚠️ Gas estimation failed for ${txType}, using default: ${gasHex}`);
+        console.log(`   Error: ${error.message}`);
+        
+        return res.json({
+          jsonrpc: '2.0',
+          id: payload.id,
+          result: gasHex
+        });
+      }
+    }
+
     // Check if this request requires gas
     if (requiresGas(payload.method) && payload.params?.[0]) {
       const tx = payload.params[0];
@@ -278,6 +451,28 @@ app.post('/', async (req, res) => {
         if (gas.formatted.usdCost) {
           console.log(`   USD Cost: $${gas.formatted.usdCost}`);
         }
+
+        // Check if this transaction requires balance checking
+        if (requiresBalanceCheck(payload.method) && tx.from) {
+          const balanceCheck = await checkSufficientBalance(tx.from, gas);
+          
+          console.log(`💰 BALANCE CHECK for ${tx.from}:`);
+          console.log(`   Current Balance: ${weiToEth(balanceCheck.userBalance).toFixed(6)} ETH`);
+          console.log(`   Required: ${weiToEth(balanceCheck.required).toFixed(6)} ETH`);
+          console.log(`   Gas Cost: ${weiToEth(balanceCheck.gasOnly).toFixed(6)} ETH`);
+          if (balanceCheck.txValue > 0n) {
+            console.log(`   Transaction Value: ${weiToEth(balanceCheck.txValue).toFixed(6)} ETH`);
+          }
+          
+          if (!balanceCheck.hasEnough) {
+            console.log(`❌ INSUFFICIENT BALANCE - Transaction will be held`);
+            // Hold the transaction and return - response will be sent when released
+            await holdTransaction(payload, gas, res);
+            return; // Don't continue processing
+          } else {
+            console.log(`✅ SUFFICIENT BALANCE - Transaction will proceed`);
+          }
+        }
       } else {
         console.log(`⚠️ Could not calculate gas for ${payload.method}`);
       }
@@ -286,12 +481,9 @@ app.post('/', async (req, res) => {
     // Check if this request should return spoofed balance
     if (shouldSpoofBalance(payload)) {
       if (requestType === 'real') {
-        console.log(`💰 Getting real balance for ${payload.method}`);
         const upstreamResponse = await forwardRpc(payload);
         return res.json(upstreamResponse);
       } else {
-        console.log(`💰 Spoofing balance for ${payload.method}`);
-        
         // Get the response from upstream first
         const upstreamResponse = await forwardRpc(payload);
         
@@ -330,6 +522,28 @@ app.post('/', async (req, res) => {
   }
 });
 
+// Status endpoint to monitor held transactions
+app.get('/status', (req, res) => {
+  const heldTxs = Array.from(heldTransactions.values()).map(tx => ({
+    id: tx.id,
+    type: tx.txType,
+    from: tx.userAddress,
+    to: tx.payload.params[0].to,
+    gasRequired: tx.gasEstimate.formatted.totalCost,
+    usdCost: tx.gasEstimate.formatted.usdCost,
+    timestamp: tx.timestamp,
+    pollCount: tx.pollCount,
+    heldFor: Date.now() - tx.timestamp
+  }));
+
+  res.json({
+    status: 'running',
+    heldTransactions: heldTxs,
+    totalHeld: heldTransactions.size,
+    uptime: process.uptime()
+  });
+});
+
 // Add CORS headers for MetaMask
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
@@ -354,5 +568,4 @@ getEthPrice().catch(console.error);
 app.listen(config.port, config.host, () => {
   console.log(`🚀 JSON-RPC proxy listening on http://${config.host}:${config.port}`);
   console.log('➡️  Forwarding to', config.upstreamRpcUrl);
-  console.log('💰 Balance spoofing active for ETH balance checks');
 }); 
