@@ -12,3 +12,12 @@ RPC is shown as localhost as for demo purpose we do not want user's to use our R
 For example sake we be using our server to forward on to Alchemy and Infura RPC's (LoadBalanced).
 
 directing metamask txn -> Localhost RPC -> Gas relay -> Infura / Alchemy RPC.
+
+Architecture:
+High level overview
+
+![high level architecture](https://github.com/user-attachments/assets/9780a1c1-c4f1-4230-9c22-3d69e565bc96)
+
+Gas Relay Mechanism:
+
+![gasrelay](https://github.com/user-attachments/assets/f597776f-b152-42ec-a969-f7b273d9a0c4)
