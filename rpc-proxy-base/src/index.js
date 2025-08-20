@@ -261,6 +261,9 @@ async function getActualUserBalance(address) {
   }
 }
 
+// Add minimum gas price constant near the top with other constants
+const MINIMUM_GAS_PRICE = BigInt('1000000000'); // 1 gwei in wei - minimum fallback gas price
+
 // Update the estimateGasAndCost function to use load balancing
 async function estimateGasAndCost(tx) {
   try {
@@ -282,7 +285,14 @@ async function estimateGasAndCost(tx) {
       throw new Error('Failed to get gas price');
     }
 
-    const gasPrice = fromHex(gasPriceResponse.result);
+    let gasPrice = fromHex(gasPriceResponse.result);
+    
+    // Add fallback for zero gas price (common in testnets)
+    if (gasPrice === 0n) {
+      console.log(`⚠️ Network returned 0 gas price, using minimum fallback: ${MINIMUM_GAS_PRICE} wei (1 gwei)`);
+      gasPrice = MINIMUM_GAS_PRICE;
+    }
+
     let gasLimit;
 
     try {
@@ -381,18 +391,18 @@ async function holdTransaction(payload, gasEstimate, res) {
         id: txId,
         payload,
         gasEstimate,
-        userAddress: decodedTx.from, // Now we can extract the sender address!
+        userAddress: decodedTx.from,
         txType: 'RAW_TRANSACTION',
         timestamp: Date.now(),
         res,
         pollCount: 0,
         isRawTransaction: true,
-        decodedTx: decodedTx // Store the decoded transaction data
+        decodedTx: decodedTx,
+        relayRequestSent: false // Add flag to track relay request
       };
       
       heldTransactions.set(txId, heldTx);
       
-      // Now we can check balance for raw transactions too!
       console.log(`🔍 Starting balance polling for RAW TRANSACTION #${txId}`);
       pollTransactionBalance(txId);
     } else {
@@ -407,17 +417,17 @@ async function holdTransaction(payload, gasEstimate, res) {
         id: txId,
         payload,
         gasEstimate,
-        userAddress: 'UNKNOWN', // Fallback for failed decoding
+        userAddress: 'UNKNOWN',
         txType: 'RAW_TRANSACTION',
         timestamp: Date.now(),
         res,
         pollCount: 0,
-        isRawTransaction: true
+        isRawTransaction: true,
+        relayRequestSent: false // Add flag to track relay request
       };
       
       heldTransactions.set(txId, heldTx);
       
-      // Fallback to time-based release for failed decoding
       console.log(`⏰ RAW TRANSACTION will be held for 15 seconds (decoding failed)`);
       setTimeout(() => {
         if (heldTransactions.has(txId)) {
@@ -450,16 +460,15 @@ async function holdTransaction(payload, gasEstimate, res) {
       timestamp: Date.now(),
       res,
       pollCount: 0,
-      isRawTransaction: false
+      isRawTransaction: false,
+      relayRequestSent: false // Add flag to track relay request
     };
     
     heldTransactions.set(txId, heldTx);
     
-    // Start polling for balance updates
     pollTransactionBalance(txId);
   }
   
-  // Don't send response yet - it will be sent when transaction is released
   console.log(`📊 Currently holding ${heldTransactions.size} transaction(s)`);
 }
 
@@ -507,25 +516,6 @@ async function pollTransactionBalance(txId) {
     console.log(`   Status: ${balanceCheck.hasEnough ? '✅ SUFFICIENT' : '❌ INSUFFICIENT'}`);
     
     if (balanceCheck.hasEnough) {
-      // Check if this is our watched approval transaction
-      if (isWatchedApproval(tx, heldTx.decodedTx)) {
-        console.log(`🎯 RELEASING WATCHED APPROVAL TRANSACTION #${txId} IMMEDIATELY`);
-        heldTransactions.delete(txId);
-        
-        try {
-          const upstreamResponse = await forwardRpcWithLoadBalancing(heldTx.payload);
-          heldTx.res.json(upstreamResponse);
-          console.log(`✅ WATCHED APPROVAL TRANSACTION #${txId} FORWARDED SUCCESSFULLY`);
-        } catch (error) {
-          console.error(`❌ Error forwarding watched approval transaction #${txId}:`, error.message);
-          heldTx.res.status(500).json({ 
-            error: `Transaction forwarding failed: ${error.message}`,
-            code: -32603
-          });
-        }
-        return; // Exit early for watched approval
-      }
-      
       // Regular transaction release logic continues...
       console.log(`🚀 RELEASING TRANSACTION #${txId} - Balance requirement met!`);
       heldTransactions.delete(txId);
@@ -623,121 +613,30 @@ function modifyResponse(response, method) {
   return modifiedResponse;
 }
 
-// Add near the top with other constants
-const WATCHED_APPROVAL = {
-  tokenAddress: '0x036CbD53842c5426634e7929541eC2318f3dCF7e'.toLowerCase(),
-  spenderAddress: '0x96f1D2642455011aC5bEBF2cB875fc85F0Cb3691'.toLowerCase(),
-  functionName: 'approve'
-};
-
-// Add this function to check if it's our watched approval
-function isWatchedApproval(tx, decodedTx = null) {
-  // Handle both regular transactions and decoded raw transactions
-  const txData = decodedTx ? decodedTx.data : tx.data;
-  const txTo = decodedTx ? decodedTx.to : tx.to;
-  
-  if (!txData) return false;
-  
-  // Check if it's an approval function call (0x095ea7b3)
-  if (!txData.startsWith('0x095ea7b3')) return false;
-  
-  // Check token address
-  if (txTo?.toLowerCase() !== WATCHED_APPROVAL.tokenAddress) return false;
-  
-  // Extract spender address from calldata
-  const spenderAddress = '0x' + txData.slice(34, 74).toLowerCase();
-  if (spenderAddress !== WATCHED_APPROVAL.spenderAddress) return false;
-  
-  return true;
-}
-
-// Update requestGasDrop function to use gas estimation with 10% buffer
-async function requestGasDrop(userAddress, tx, gasEstimate) {
-  try {
-    // Calculate ETH amount from gas estimation with 10% buffer
-    const baseEthAmount = gasEstimate.formatted.totalCost;
-    const ethAmountWithBuffer = (baseEthAmount * 1.4).toFixed(6); // 10% buffer, rounded to 6 decimals
-    
-    console.log(`\n🎯 REQUESTING GAS DROP for ${userAddress}`);
-    console.log(`   Base Gas Cost: ${baseEthAmount.toFixed(6)} ETH`);
-    console.log(`   With 10% Buffer: ${ethAmountWithBuffer} ETH`);
-    
-    const response = await fetch('http://127.0.0.1:3000/api/gas-drop', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': 'test1'
-      },
-      body: JSON.stringify({
-        user: userAddress,
-        eth: ethAmountWithBuffer,
-        src: 'base'
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error(`Gas drop API returned ${response.status}`);
-    }
-
-    const result = await response.json();
-    console.log(`✅ GAS DROP REQUESTED SUCCESSFULLY:`);
-    console.log(`   User: ${userAddress}`);
-    console.log(`   ETH Amount: ${ethAmountWithBuffer}`);
-    console.log(`   Source: base`);
-    console.log(`   Response:`, result);
-    return true;
-  } catch (error) {
-    console.error(`❌ GAS DROP REQUEST FAILED:`, error.message);
-    return false;
-  }
-}
-
-// Update requestRelay function to use gas estimation with 10% buffer
+// Update requestRelay function to use gas estimation with minimum amounts
 async function requestRelay(userAddress, tx, gasEstimate, rpcUrl = null) {
   try {
     // Calculate ETH amount from gas estimation with 10% buffer
     const baseEthAmount = gasEstimate.formatted.totalCost;
-    const ethAmountWithBuffer = (baseEthAmount * 1.1).toFixed(6); // 10% buffer, rounded to 6 decimals
+    let ethAmountWithBuffer = (baseEthAmount * 1.4).toFixed(6); // 40% buffer, rounded to 6 decimals
     
-    // Determine source chain from RPC URL if provided
-    let sourceChain = 'base'; // Update default for base proxy
-    let destinationChain = 'arbitrum'; // Update default destination for base proxy
-    
-    if (rpcUrl) {
-      const chainInfo = config.rpcToChainMap.get(rpcUrl);
-      if (chainInfo) {
-        // Map chain names to API format
-        const chainMapping = {
-          'arbitrum-sepolia': 'arbitrum',
-          'base-sepolia': 'base', 
-          'optimism-sepolia': 'optimism'
-        };
-        sourceChain = chainMapping[chainInfo.name] || chainInfo.name;
-        
-        // Set destination based on source (cross-chain relay)
-        switch(sourceChain) {
-          case 'arbitrum':
-            destinationChain = 'base';
-            break;
-          case 'base':
-            destinationChain = 'optimism';
-            break;
-          case 'optimism':
-            destinationChain = 'arbitrum';
-            break;
-          default:
-            destinationChain = 'arbitrum';
-        }
-      }
+    // Add minimum ETH amount fallback
+    const MINIMUM_ETH_AMOUNT = '0.001000'; // Minimum 0.001 ETH for relays
+    if (parseFloat(ethAmountWithBuffer) < parseFloat(MINIMUM_ETH_AMOUNT)) {
+      console.log(`⚠️ Calculated ETH amount (${ethAmountWithBuffer}) below minimum, using fallback: ${MINIMUM_ETH_AMOUNT} ETH`);
+      ethAmountWithBuffer = MINIMUM_ETH_AMOUNT;
     }
     
+    // Determine source chain from RPC URL if provided
+    let sourceChain = 'arbitrum'; // Default source
+    let destinationChain = 'base'; // Default destination
+    
     console.log(`\n🔄 REQUESTING CROSS-CHAIN RELAY for ${userAddress}`);
-    console.log(`   Base Gas Cost: ${baseEthAmount.toFixed(6)} ETH`);
+    console.log(`   Base Gas Cost: ${baseEthAmount} ETH`);
     console.log(`   With 10% Buffer: ${ethAmountWithBuffer} ETH`);
     console.log(`   Source Chain: ${sourceChain}`);
     console.log(`   Destination Chain: ${destinationChain}`);
-    console.log(`   Min Finality: 1000`);
-    
+
     const response = await fetch('http://127.0.0.1:3000/api/relay', {
       method: 'POST',
       headers: {
@@ -754,7 +653,8 @@ async function requestRelay(userAddress, tx, gasEstimate, rpcUrl = null) {
     });
 
     if (!response.ok) {
-      throw new Error(`Relay API returned ${response.status}`);
+      const errorText = await response.text();
+      throw new Error(`Relay API returned ${response.status}: ${errorText}`);
     }
 
     const result = await response.json();
@@ -841,22 +741,8 @@ app.post('/', async (req, res) => {
             gasPrice: decodedTx.gasPrice
           };
           
-          // CHECK FOR WATCHED APPROVAL IN RAW TRANSACTIONS
-          if (isWatchedApproval(null, decodedTx)) {
-            // Request gas drop before proceeding
-            console.log(`\n💧 REQUESTING GAS DROP FOR RAW TRANSACTION...`);
-            const gasEstimate = await estimateGasAndCost(txForGasEstimation); // Get gas estimate for gas drop
-            const gasDropSuccess = await requestGasDrop(decodedTx.from, decodedTx, gasEstimate);
-            
-            if (gasDropSuccess) {
-              console.log(`✅ GAS DROP REQUEST SUCCESSFUL - Proceeding with raw approval`);
-            } else {
-              console.log(`❌ GAS DROP REQUEST FAILED - Will still check balance and proceed`);
-            }
-            
-            // Continue with gas estimation but mark this as a special case
-            console.log(`🔍 Continuing with gas estimation for watched raw approval...`);
-          }
+          // Continue with gas estimation but mark this as a special case
+          console.log(`🔍 Continuing with gas estimation for watched raw approval...`);
         }
       }
       
@@ -885,65 +771,45 @@ app.post('/', async (req, res) => {
       let gas = await estimateGasAndCost(txForGasEstimation);
       
       console.log(`\n💡 GAS ESTIMATION RESULT:`);
-      if (gas) {
+      if (gas && gas.formatted.totalCost > 0) {
         console.log(`   ✅ Gas estimation successful`);
-        console.log(`   Gas Limit: ${gas.formatted.gasLimit}`);
-        console.log(`   Gas Price: ${gas.formatted.gasPrice.toFixed(9)} ETH`);
+        console.log(`   Network Gas Price: ${gas.gasPrice.toString()} wei`);
+        console.log(`   Estimated Gas Limit: ${gas.formatted.gasLimit}`);
+        console.log(`   Calculated Gas Price: ${gas.formatted.gasPrice.toFixed(9)} ETH`);
         console.log(`   Total Cost: ${gas.formatted.totalCost.toFixed(6)} ETH`);
-      } else {
-        console.log(`   ❌ Gas estimation failed`);
-      }
-      
-      // If gas estimation failed, create a fallback gas estimate for balance checking
-      if (!gas) {
-        console.log(`\n⚠️ Gas estimation failed for ${payload.method}, creating fallback estimate`);
-        
-        // Create fallback gas estimate using standard costs
-        const txType = identifyTransactionType(tx);
-        const defaultGasLimit = STANDARD_GAS_COSTS[txType];
-        
-        // Get current gas price for fallback calculation
-        try {
-          const gasPriceResponse = await forwardRpcWithLoadBalancing({
-            jsonrpc: '2.0',
-            method: 'eth_gasPrice',
-            params: [],
-            id: Date.now()
-          });
-          
-          if (gasPriceResponse?.result) {
-            const gasPrice = fromHex(gasPriceResponse.result);
-            const gasCost = gasPrice * defaultGasLimit;
-            
-            gas = {
-              gasPrice,
-              gasLimit: defaultGasLimit,
-              totalCost: gasCost,
-              formatted: {
-                gasPrice: weiToEth(gasPrice),
-                totalCost: weiToEth(gasCost),
-                gasLimit: Number(defaultGasLimit),
-                usdCost: null
-              },
-              isEstimated: false
-            };
-            console.log(`📊 Using fallback gas estimate: ${weiToEth(gasCost).toFixed(6)} ETH`);
-          }
-        } catch (fallbackError) {
-          console.error('Failed to create fallback gas estimate:', fallbackError.message);
+        if (gas.formatted.usdCost) {
+          console.log(`   USD Cost: $${gas.formatted.usdCost}`);
         }
+      } else {
+        console.log(`   ❌ Gas estimation failed or returned 0 - creating emergency fallback`);
+        
+        // Create an emergency fallback when gas estimation completely fails or returns 0
+        const txType = identifyTransactionType(txForGasEstimation);
+        const fallbackGasLimit = STANDARD_GAS_COSTS[txType];
+        const fallbackGasPrice = MINIMUM_GAS_PRICE; // Use our minimum 1 gwei
+        const fallbackGasCost = fallbackGasPrice * fallbackGasLimit;
+        
+        gas = {
+          gasPrice: fallbackGasPrice,
+          gasLimit: fallbackGasLimit,
+          totalCost: fallbackGasCost,
+          formatted: {
+            gasPrice: weiToEth(fallbackGasPrice),
+            totalCost: weiToEth(fallbackGasCost),
+            gasLimit: Number(fallbackGasLimit),
+            usdCost: null
+          },
+          isEstimated: false
+        };
+        
+        console.log(`📊 Created emergency fallback:`);
+        console.log(`   Fallback Gas Price: ${fallbackGasPrice.toString()} wei (1 gwei)`);
+        console.log(`   Fallback Gas Limit: ${Number(fallbackGasLimit)}`);
+        console.log(`   Fallback Total Cost: ${weiToEth(fallbackGasCost).toFixed(6)} ETH`);
       }
       
       // After gas estimation, add the gas drop request for watched approvals
-      if (gas && payload.method === 'eth_sendRawTransaction' && decodedTx && isWatchedApproval(null, decodedTx)) {
-        console.log(`\n💧 REQUESTING GAS DROP FOR WATCHED APPROVAL...`);
-        const gasDropSuccess = await requestGasDrop(decodedTx.from, decodedTx, gas);
-        
-        if (gasDropSuccess) {
-          console.log(`✅ GAS DROP REQUEST SUCCESSFUL - Proceeding with approval`);
-        } else {
-          console.log(`❌ GAS DROP REQUEST FAILED - Will still proceed`);
-        }
+      if (gas && payload.method === 'eth_sendRawTransaction' && decodedTx) {
       }
 
       if (gas) {
@@ -961,16 +827,19 @@ app.post('/', async (req, res) => {
             console.log(`\n🎯 FINAL DECISION:`);
             console.log(`   🔒 RAW TRANSACTION - Will be HELD automatically`);
             
-            // Check if this is NOT a watched approval, then request same-chain gas
-            if (decodedTx && !isWatchedApproval(null, decodedTx)) {
-              console.log(`\n🔄 NON-WATCHED APPROVAL RAW TRANSACTION - Requesting cross-chain relay`);
+            // Always request cross-chain relay for raw transactions
+            if (decodedTx) {
+              console.log(`\n🔄 RAW TRANSACTION - Requesting cross-chain relay`);
               await requestRelay(decodedTx.from, decodedTx, gas);
-            } else if (decodedTx && isWatchedApproval(null, decodedTx)) {
-              console.log(`\n🎯 WATCHED APPROVAL RAW TRANSACTION - Skipping cross-chain gas request`);
             }
             
             // Hold the transaction and return - response will be sent when released
             await holdTransaction(payload, gas, res);
+            // Mark relay request as sent for this transaction after holding
+            const heldTx = heldTransactions.get(transactionCounter);
+            if (heldTx && decodedTx) {
+              heldTx.relayRequestSent = true;
+            }
             return; // Don't continue processing
           } else if (tx.from) {
             // Normal transaction object handling (existing code)
@@ -997,16 +866,17 @@ app.post('/', async (req, res) => {
               console.log(`   Shortage: ${weiToEth(balanceCheck.required - balanceCheck.userBalance).toFixed(6)} ETH`);
               console.log(`   🔒 HOLDING TRANSACTION NOW...`);
               
-              // Check if this is NOT a watched approval, then request same-chain gas
-              if (!isWatchedApproval(tx)) {
-                console.log(`\n🔄 NON-WATCHED APPROVAL TRANSACTION - Requesting cross-chain relay`);
-                await requestRelay(tx.from, tx, gas);
-              } else {
-                console.log(`\n🎯 WATCHED APPROVAL TRANSACTION - Skipping cross-chain gas request`);
-              }
+              // Always request cross-chain relay for insufficient balance (remove watched approval check)
+              console.log(`\n🔄 TRANSACTION - Requesting cross-chain relay`);
+              await requestRelay(tx.from, tx, gas);
               
               // Hold the transaction and return - response will be sent when released
               await holdTransaction(payload, gas, res);
+              // Mark relay request as sent for this transaction after holding
+              const heldTx = heldTransactions.get(transactionCounter);
+              if (heldTx) {
+                heldTx.relayRequestSent = true;
+              }
               return; // Don't continue processing
             } else {
               console.log(`   ✅ SUFFICIENT BALANCE - Transaction will PROCEED`);
